@@ -68,13 +68,13 @@ from daytona import (
 # ============================================================
 # 配置（均可通过环境变量覆盖）
 # ============================================================
-DAYTONA_API_KEY = os.environ.get("DAYTONA_API_KEY", "dtn_3296bc8a9291d2c75fa16d1716107bf6aa088b2aef1d8b24c3aa353366ab11a3")
+DAYTONA_API_KEY = os.environ.get("DAYTONA_API_KEY", "")
 SNAPSHOT_NAME = os.environ.get("SNAPSHOT_NAME", "claude-code-snapshot")
 # 沙箱名：未设置 SANDBOX_NAME 时使用「前缀+6位随机hex」保证每次唯一
 SANDBOX_NAME_PREFIX = os.environ.get("SANDBOX_NAME_PREFIX", "code_review")
 
 OPENROUTER_BASE_URL = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api")
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "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")
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 CLAUDE_MODEL = os.environ.get(
     "ANTHROPIC_MODEL",
     os.environ.get("ANTHROPIC_DEFAULT_SONNET_MODEL", "anthropic/claude-sonnet-4.6"),
