@@ -37,7 +37,8 @@ Prompt / Schema 解析顺序：
     ANTHROPIC_MODEL      — 模型名称（也读取 ANTHROPIC_DEFAULT_SONNET_MODEL）
     DAYTONA_API_KEY      — Daytona API 密钥
     SNAPSHOT_NAME        — Daytona 快照名
-    SANDBOX_NAME         — 沙箱名称（建议由 shell wrapper 生成唯一名称）
+    SANDBOX_NAME         — 沙箱名称（可选；未设置时用 SANDBOX_NAME_PREFIX+6位随机hex）
+    SANDBOX_NAME_PREFIX  — 随机命名时的前缀（默认 code_review）
     GIT_REPO_URL         — 本仓库地址
     GIT_BRANCH           — 分支
     GIT_USERNAME         — Git 用户名
@@ -50,6 +51,7 @@ import os
 import re
 import sys
 import time
+import uuid
 from pathlib import Path
 
 from daytona import (
@@ -68,7 +70,8 @@ from daytona import (
 # ============================================================
 DAYTONA_API_KEY = os.environ.get("DAYTONA_API_KEY", "dtn_3296bc8a9291d2c75fa16d1716107bf6aa088b2aef1d8b24c3aa353366ab11a3")
 SNAPSHOT_NAME = os.environ.get("SNAPSHOT_NAME", "claude-code-snapshot")
-SANDBOX_NAME = os.environ.get("SANDBOX_NAME", "test11")
+# 沙箱名：未设置 SANDBOX_NAME 时使用「前缀+6位随机hex」保证每次唯一
+SANDBOX_NAME_PREFIX = os.environ.get("SANDBOX_NAME_PREFIX", "code_review")
 
 OPENROUTER_BASE_URL = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "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")
@@ -647,12 +650,15 @@ def main():
 
     daytona = Daytona(DaytonaConfig(api_key=DAYTONA_API_KEY))
 
-    # 若已有同名沙箱则先删除，避免 create 报 "name already exists"
+    sandbox_name = os.environ.get("SANDBOX_NAME") or f"{SANDBOX_NAME_PREFIX}-{uuid.uuid4().hex[:6]}"
+    print(f"沙箱名称: {sandbox_name}")
+
+    # 若已有同名沙箱则先删除（例如显式指定了 SANDBOX_NAME 时）
     try:
-        existing = daytona.get(SANDBOX_NAME)
+        existing = daytona.get(sandbox_name)
         print(f"发现已存在沙箱: {existing.id}，正在删除...")
         daytona.delete(existing)
-        time.sleep(2)  # 等待删除完成后再创建
+        time.sleep(2)
     except DaytonaNotFoundError:
         pass
     except Exception as e:
@@ -664,7 +670,7 @@ def main():
         try:
             sandbox = daytona.create(
                 CreateSandboxFromSnapshotParams(
-                    name=SANDBOX_NAME,
+                    name=sandbox_name,
                     snapshot=SNAPSHOT_NAME,
                     network_block_all=False,
                     auto_stop_interval=0,
@@ -687,20 +693,20 @@ def main():
             if "already exists" in str(e).lower():
                 print(f"沙箱名已存在，正在删除后重试: {e}")
                 try:
-                    existing = daytona.get(SANDBOX_NAME)
-                    daytona.delete(existing)
-                    time.sleep(3)
+                    daytona.delete(daytona.get(sandbox_name))
+                    time.sleep(2)
                 except Exception:
                     pass
                 sandbox = daytona.create(
                     CreateSandboxFromSnapshotParams(
-                        name=SANDBOX_NAME,
+                        name=sandbox_name,
                         snapshot=SNAPSHOT_NAME,
                         network_block_all=False,
                         auto_stop_interval=0,
                         auto_delete_interval=0,
                         resources=Resources(cpu=2, memory=4, disk=5),
                         env_vars={
+                            "OPENROUTER_API_KEY": OPENROUTER_API_KEY,
                             "ANTHROPIC_BASE_URL": OPENROUTER_BASE_URL,
                             "ANTHROPIC_AUTH_TOKEN": OPENROUTER_API_KEY,
                             "ANTHROPIC_API_KEY": "",

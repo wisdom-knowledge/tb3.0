@@ -1,0 +1,14 @@
+[
+  {
+    "totalDiscount": "1.00",
+    "items": [
+      {"sku": "MAIN", "amount": "19.99"},
+      {"sku": "TINY", "amount": "0.01"}
+    ],
+    "expected": {
+      "MAIN": "1.00",
+      "TINY": "0.00"
+    },
+    "note": "Legacy behavior from old system; kept for compatibility discussions."
+  }
+]
