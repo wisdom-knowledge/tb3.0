@@ -397,6 +397,50 @@ _EXPECTED_REVIEW_KEYS = frozenset({
     "query_check", "rubric_format_check", "rubric_content_check", "rubric_adjustment_check", "additional_checks",
 }) | _SCHEMA_CRITERIA_NAMES
 
+# 19 条准则名，用于兜底输出（与 schema.json 一致）
+_SCHEMA_CRITERIA_LIST = (
+    "verifiable", "well_specified", "solvable", "difficult", "interesting",
+    "outcome_verified", "anti_cheat_robustness", "functional_verification",
+    "deterministic_reproducible", "essential_difficulty", "test_instruction_alignment",
+    "novel", "agentic", "reviewable", "instruction_clarity", "solution_quality",
+    "environment_hygiene", "structured_data_schema", "typos",
+)
+
+
+def _make_schema_fallback(review_suggestions_text: str) -> dict:
+    """构造符合 schema 的兜底输出（含 rubrics_review_result）。"""
+    criteria = {
+        name: {"outcome": "N/A", "explanation": "模型未返回该条判定"}
+        for name in _SCHEMA_CRITERIA_LIST
+    }
+    return {
+        "rubrics_review_result": {
+            "review_suggestions": review_suggestions_text,
+            "task_path": "",
+            "criteria": criteria,
+            "summary": {"passed": 0, "failed": 0, "na": len(_SCHEMA_CRITERIA_LIST), "failed_criteria": []},
+        }
+    }
+
+
+def _fallback_message_from_raw(raw_preview: str) -> str:
+    """根据模型返回的短文本生成可读的兜底说明。"""
+    if not raw_preview or not isinstance(raw_preview, str):
+        return "模型未返回符合 schema 的 structured_output，仅返回了文本或包装。"
+    s = raw_preview.strip()
+    if "Prompt is too long" in s or "prompt is too long" in s.lower() or "input is too long" in s.lower():
+        return (
+            "输入过长：模型返回「Prompt is too long」。\n\n"
+            "请缩短系统 prompt 或减少任务内容，例如：\n"
+            "1) 精简 prompt.md / prompt.txt；\n"
+            "2) 调低环境变量 REVIEW_MAX_TOTAL_INPUT_BYTES（默认 2MB）、REVIEW_MAX_BYTES_PER_FILE（默认 512KB）；\n"
+            "3) 减少 --task-dir 下纳入的文件数量或大小。\n\n"
+            "原始返回：" + s[:500]
+        )
+    if "context" in s.lower() and "length" in s.lower():
+        return "上下文/输入长度超限。请缩短 prompt 或任务内容。\n\n原始返回：" + s[:500]
+    return "模型未返回符合 schema 的 structured_output，仅返回了文本或包装。\n\n原始返回：" + s[:2000]
+
 
 def _is_claude_error_response(obj: dict) -> bool:
     """判断是否为 Claude Code CLI 的错误/元数据包装（非有效审核结果）。"""
@@ -966,28 +1010,25 @@ def main():
         write_content = claude_output
         try:
             final_parsed = json.loads(claude_output)
-            # 若仍是 API 包装（含 type/result 等）而非审核结果，不写入包装，改为写入占位说明
+            # 若仍是 API 包装（含 type/result 等）而非审核结果，写入 schema 兜底并给出可读说明
             if isinstance(final_parsed, dict) and ("type" in final_parsed or "result" in final_parsed) and not (_EXPECTED_REVIEW_KEYS & set(final_parsed.keys()) or "query_check" in final_parsed or "rubrics_review_result" in final_parsed):
-                raw_preview = (final_parsed.get("result") or claude_output)[:2000]
+                raw_preview = final_parsed.get("result") or claude_output
                 if isinstance(raw_preview, dict):
                     raw_preview = json.dumps(raw_preview, ensure_ascii=False)[:2000]
-                write_content = json.dumps(
-                    {
-                        "_output_format": "structured_output",
-                        "_missing": "模型未返回符合 schema 的 structured_output，仅返回了文本或包装",
-                        "raw_result_preview": raw_preview if isinstance(raw_preview, str) else str(raw_preview),
-                    },
-                    ensure_ascii=False,
-                )
-                final_parsed = json.loads(write_content)
+                else:
+                    raw_preview = (raw_preview or "")[:2000] if isinstance(raw_preview, str) else str(raw_preview)[:2000]
+                msg = _fallback_message_from_raw(raw_preview)
+                if "Prompt is too long" in (raw_preview if isinstance(raw_preview, str) else "") or "输入过长" in msg:
+                    print("提示：模型返回「Prompt is too long」，请缩短 prompt 或减少任务内容后重试。")
+                fallback = _make_schema_fallback(msg)
+                write_content = json.dumps(fallback, ensure_ascii=False, indent=2)
+                final_parsed = fallback
             else:
                 _validate_review_output(final_parsed, output_file, strict_keys=not use_local)
         except json.JSONDecodeError as e:
-            print(f"WARNING: 最终 JSON 解析失败，写入带标记的结果 — {e}")
-            write_content = json.dumps(
-                {"_parse_error": True, "raw_preview": claude_output[:2000], "error": str(e)},
-                ensure_ascii=False,
-            )
+            print(f"WARNING: 最终 JSON 解析失败 — {e}")
+            msg = f"JSON 解析失败: {e}\n\n原始预览：\n{(claude_output or '')[:1500]}"
+            write_content = json.dumps(_make_schema_fallback(msg), ensure_ascii=False, indent=2)
         except SystemExit:
             raise
 
