@@ -402,32 +402,51 @@ def _is_claude_error_response(obj: dict) -> bool:
     """判断是否为 Claude Code CLI 的错误/元数据包装（非有效审核结果）。"""
     if not isinstance(obj, dict):
         return False
+    
+    # 获取 subtype
     subtype = obj.get("subtype", "")
+    
+    # 检查 subtype 是否为错误类型
     if isinstance(subtype, str) and subtype.startswith("error_"):
         return True
+    
+    # 处理 type 为 result，且 is_error 为 True 的情况
     if obj.get("type") == "result" and obj.get("is_error") is True:
         return True
+    
+    # 检查 subtype 是否为错误类型
     if obj.get("type") == "result" and isinstance(subtype, str) and subtype in _CLAUDE_ERROR_SUBTYPES:
         return True
+    
     return False
 
 
 def _abort_on_error_response(obj: dict, output_file: str):
     """将错误信息写入输出文件并以非零退出码结束。"""
     subtype = obj.get("subtype", "unknown")
+    
+    # 获取错误消息
     errors = obj.get("errors", [])
     error_msg = "; ".join(errors) if errors else subtype
-    print(f"错误：Claude Code CLI 返回错误响应: subtype={subtype}")
-    print(f"错误：{error_msg}")
-    error_result = {
-        "解析失败": {
-            "原因": f"Claude Code CLI 错误: {error_msg}",
-            "subtype": subtype,
+    
+    # 打印错误信息
+    if subtype == "success":
+        print(f"成功：Claude Code CLI 返回成功响应: subtype={subtype}")
+    else:
+        print(f"错误：Claude Code CLI 返回错误响应: subtype={subtype}")
+        print(f"错误信息：{error_msg}")
+        
+        # 记录错误到文件
+        error_result = {
+            "解析失败": {
+                "原因": f"Claude Code CLI 错误: {error_msg}",
+                "subtype": subtype,
+            }
         }
-    }
-    with open(output_file, "w", encoding="utf-8") as f:
-        json.dump(error_result, f, ensure_ascii=False)
-    sys.exit(4)
+        with open(output_file, "w", encoding="utf-8") as f:
+            json.dump(error_result, f, ensure_ascii=False)
+        
+        sys.exit(4)  # 错误退出
 
 
 def _validate_review_output(obj: dict, output_file: str, strict_keys: bool = True):
