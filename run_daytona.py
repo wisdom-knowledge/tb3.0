@@ -82,9 +82,9 @@ CLAUDE_MODEL = os.environ.get(
 
 GIT_REPO_URL = os.environ.get(
     "GIT_REPO_URL",
-    "https://github.com/wisdom-knowledge/claude-code-review.git",
+    "https://github.com/wisdom-knowledge/tb3.0",
 )
-GIT_BRANCH = os.environ.get("GIT_BRANCH", "feat/skill_review_0225")
+GIT_BRANCH = os.environ.get("GIT_BRANCH", "master")
 GIT_USERNAME = os.environ.get("GIT_USERNAME", "")
 GIT_TOKEN = os.environ.get("GIT_TOKEN", "")
 
