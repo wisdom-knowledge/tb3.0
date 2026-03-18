@@ -1,37 +1,31 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """
-流水线「写入数据库」：从飞书多维表格读取字段，写入 ByteHouse task_events。
+流水线：读取本地机审结果 -> 回填飞书多维表格 -> 写入 ByteHouse
 
-流程：连接飞书 + ByteHouse → 从飞书表格获取对应字段 → 映射后写入数据库。
+功能：
+1. 从本地 result.json 读取机审结果
+2. 从本地 record.json / 环境变量读取 record_id
+3. 更新飞书多维表格当前记录的 code_review_result 字段
+4. 读取该飞书记录的补充字段（如 千识TalentID、版本）
+5. 将结果写入 ByteHouse task_events
 
-字段映射：
-  - id           = 随机 UUID
-  - record_id    = 飞书表格中的记录 ID
-  - talent_id    = 飞书列「千识TalentID」
-  - event_time   = 当前时间
-  - event_type   = task_submit
-  - source_table = 飞书列「版本」
-  - content      = 飞书列「code_review_result」
-
-运行（流水线自定义命令）:
-  pip install requests clickhouse-driver -q && python pipeline_feishu_bytehouse.py
-
-环境变量（由流水线注入）:
-  飞书: APP_ID/FEISHU_APP_ID, APP_SECRET/FEISHU_APP_SECRET,
-        APP_TOKEN/BITABLE_APP_TOKEN, COMMIT_TABLE_ID/BITABLE_TABLE_ID
-  ByteHouse: BH_HOST, BH_PORT, BH_USER, BH_PASSWORD, BH_DATABASE, BH_VW_ID
-  可选: RECORD_ID — 指定飞书记录 ID，不传则取第一页第一条
-        FEISHU_FIELD_TALENT_ID    — talent_id 对应列名，默认 千识TalentID
-        FEISHU_FIELD_SOURCE_TABLE — source_table 对应列名，默认 版本
-        FEISHU_FIELD_CONTENT      — content 对应列名，默认 code_review_result
+运行示例：
+python3 /workspace/pipeline_feishu_bytehouse.py \
+  --result-file /workspace/result.json \
+  --record-file /workspace/record.json
 """
 
+import argparse
 import json
 import os
+import re
 import sys
 import uuid
-import requests
 from datetime import datetime
+
+import requests
 
 try:
     from clickhouse_driver import Client
@@ -51,7 +45,7 @@ def _env(key: str, *alt: str) -> str:
     return ""
 
 
-# ---------- 配置 ----------
+# ---------- 环境变量 ----------
 FEISHU_APP_ID = _env("FEISHU_APP_ID", "APP_ID")
 FEISHU_APP_SECRET = _env("FEISHU_APP_SECRET", "APP_SECRET")
 BITABLE_APP_TOKEN = _env("BITABLE_APP_TOKEN", "APP_TOKEN")
@@ -64,110 +58,219 @@ BH_PASSWORD = _env("BH_PASSWORD")
 BH_DATABASE = _env("BH_DATABASE")
 BH_VW_ID = _env("BH_VW_ID")
 
-RECORD_ID = _env("RECORD_ID")
-# 飞书列名（可用环境变量覆盖）
-FEISHU_FIELD_TALENT_ID = "千识TalentID"
-FEISHU_FIELD_SOURCE_TABLE = "版本"
-FEISHU_FIELD_CONTENT = "code_review_result"
-DEFAULT_TALENT_ID = "default_talent"
+RECORD_ID_ENV = _env("RECORD_ID")
+
+# ---------- 飞书字段名 ----------
+FEISHU_FIELD_TALENT_ID = _env("FEISHU_FIELD_TALENT_ID") or "千识TalentID"
+FEISHU_FIELD_SOURCE_TABLE = _env("FEISHU_FIELD_SOURCE_TABLE") or "版本"
+FEISHU_FIELD_CONTENT = _env("FEISHU_FIELD_CONTENT") or "code_review_result"
+
+DEFAULT_TALENT_ID = _env("DEFAULT_TALENT_ID") or "default_talent"
+DEFAULT_SOURCE_TABLE = _env("DEFAULT_SOURCE_TABLE") or "feishu_bitable"
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="回填飞书 + 写入 ByteHouse")
+    parser.add_argument(
+        "--result-file",
+        default="/workspace/result.json",
+        help="机审结果文件路径，默认 /workspace/result.json",
+    )
+    parser.add_argument(
+        "--record-file",
+        default="/workspace/record.json",
+        help="回填飞书记录文件路径，默认 /workspace/record.json",
+    )
+    parser.add_argument(
+        "--skip-feishu-update",
+        action="store_true",
+        help="跳过飞书更新，仅写 ByteHouse",
+    )
+    return parser.parse_args()
+
+
+def check_required_env():
+    required = [
+        ("FEISHU_APP_ID", FEISHU_APP_ID),
+        ("FEISHU_APP_SECRET", FEISHU_APP_SECRET),
+        ("BITABLE_APP_TOKEN", BITABLE_APP_TOKEN),
+        ("BITABLE_TABLE_ID", BITABLE_TABLE_ID),
+        ("BH_HOST", BH_HOST),
+        ("BH_PORT", BH_PORT),
+        ("BH_USER", BH_USER),
+        ("BH_PASSWORD", BH_PASSWORD),
+        ("BH_DATABASE", BH_DATABASE),
+        ("BH_VW_ID", BH_VW_ID),
+    ]
+    missing = [name for name, val in required if not val]
+    if missing:
+        print(f"错误: 缺少环境变量: {', '.join(missing)}", file=sys.stderr)
+        sys.exit(1)
+
+
+def read_json_file(path: str) -> dict:
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"文件不存在: {path}")
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def json_stringify(obj) -> str:
+    return json.dumps(obj, ensure_ascii=False)
+
+
+def resolve_record_id(record_data: dict) -> str:
+    """
+    record_id 优先级：
+    1. 环境变量 RECORD_ID
+    2. record.json 顶层 record_id
+    """
+    rid = (RECORD_ID_ENV or "").strip()
+    if rid:
+        return rid
+
+    rid = str(record_data.get("record_id", "")).strip()
+    if rid:
+        return rid
+
+    return ""
+
+
+def normalize_field_value(value) -> str:
+    if value is None:
+        return ""
+
+    if isinstance(value, (str, int, float, bool)):
+        return str(value)
+
+    if isinstance(value, dict):
+        if "text" in value and value["text"] is not None:
+            return str(value["text"])
+        return json.dumps(value, ensure_ascii=False)
+
+    if isinstance(value, list):
+        parts = []
+        for item in value:
+            if isinstance(item, (str, int, float, bool)):
+                parts.append(str(item))
+            elif isinstance(item, dict):
+                if "text" in item and item["text"] is not None:
+                    parts.append(str(item["text"]))
+                elif "name" in item and item["name"] is not None:
+                    parts.append(str(item["name"]))
+                else:
+                    parts.append(json.dumps(item, ensure_ascii=False))
+            else:
+                parts.append(str(item))
+        return ", ".join([p for p in parts if p])
+
+    return str(value)
 
 
 def get_feishu_token() -> str:
     url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
-    r = requests.post(
+    resp = requests.post(
         url,
         json={"app_id": FEISHU_APP_ID, "app_secret": FEISHU_APP_SECRET},
         timeout=30,
     )
-    r.raise_for_status()
-    data = r.json()
+    resp.raise_for_status()
+    data = resp.json()
     if data.get("code") != 0:
-        raise RuntimeError(f"飞书 token 失败: {data}")
+        raise RuntimeError(f"获取飞书 tenant_access_token 失败: {data}")
     return data["tenant_access_token"]
 
 
 def feishu_get_record(token: str, record_id: str) -> dict:
-    """从飞书多维表格拉取一条记录。"""
     url = (
         f"https://open.feishu.cn/open-apis/bitable/v1/apps/{BITABLE_APP_TOKEN}"
         f"/tables/{BITABLE_TABLE_ID}/records/{record_id}"
     )
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    r = requests.get(url, headers=headers, timeout=30)
-    r.raise_for_status()
-    data = r.json()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    resp = requests.get(url, headers=headers, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
     if data.get("code") != 0:
-        raise RuntimeError(f"飞书获取记录失败: {data}")
+        raise RuntimeError(f"获取飞书记录失败: {data}")
     return data.get("data", {}).get("record", {})
 
 
-def feishu_get_first_record(token: str) -> dict | None:
-    """拉取飞书表格第一页第一条记录。"""
+def feishu_update_record(token: str, record_id: str, fields: dict):
+    """
+    更新飞书多维表格指定记录。
+    """
     url = (
         f"https://open.feishu.cn/open-apis/bitable/v1/apps/{BITABLE_APP_TOKEN}"
-        f"/tables/{BITABLE_TABLE_ID}/records?page_size=1"
+        f"/tables/{BITABLE_TABLE_ID}/records/{record_id}"
     )
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    r = requests.get(url, headers=headers, timeout=30)
-    r.raise_for_status()
-    data = r.json()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    payload = {"fields": fields}
+
+    resp = requests.put(url, headers=headers, json=payload, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
     if data.get("code") != 0:
-        raise RuntimeError(f"飞书查询失败: {data}")
-    items = data.get("data", {}).get("items", [])
-    return items[0] if items else None
+        raise RuntimeError(f"更新飞书记录失败: {data}")
+    return data
 
 
-def record_to_row(record: dict) -> tuple:
+def safe_database_name(name: str) -> str:
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name or ""):
+        raise ValueError(f"非法数据库名: {name}")
+    return name
+
+
+def build_bytehouse_row(record: dict, review_content: str) -> tuple:
     """
-    将飞书一条记录转为 task_events 表一行。
-    返回 (id, record_id, talent_id, event_time, source_table, event_type, content)。
+    将飞书记录 + 本地机审结果 映射成 task_events 一行。
     """
-    record_id = record.get("record_id", "")
-    fields = record.get("fields", {})
-    # talent_id = 多维表格「千识TalentID」列
-    talent_id = fields.get("千识TalentID")
-    if isinstance(talent_id, dict):
-        talent_id = talent_id.get("text") or str(talent_id)
-    talent_id = str(talent_id).strip() if talent_id else DEFAULT_TALENT_ID
-    print("talent_id内容:", talent_id)
+    record_id = str(record.get("record_id", "")).strip()
+    fields = record.get("fields", {}) or {}
 
-    # source_table = 多维表格「版本」列
-    source_table = fields.get(FEISHU_FIELD_SOURCE_TABLE)
-    if isinstance(source_table, dict):
-        source_table = source_table.get("text") or str(source_table)
-        source_table = str(source_table).strip() if source_table else "feishu_bitable"
-
-    # content = code_review_result 字段内容
-    content = fields.get(FEISHU_FIELD_CONTENT)
-    print("content内容:", content)
-    if isinstance(content, dict):
-        content = content.get("text") or json.dumps(content, ensure_ascii=False)
-    content = str(content) if content else ""
+    talent_id = normalize_field_value(fields.get(FEISHU_FIELD_TALENT_ID)).strip() or DEFAULT_TALENT_ID
+    source_table = normalize_field_value(fields.get(FEISHU_FIELD_SOURCE_TABLE)).strip() or DEFAULT_SOURCE_TABLE
 
     event_time = datetime.now()
     event_type = "task_submit"
-    row_id =  str(uuid.uuid4())
+    row_id = str(uuid.uuid4())
 
-    return (row_id, record_id, talent_id, event_time, source_table, event_type, content)
+    return (
+        row_id,
+        record_id,
+        talent_id,
+        event_time,
+        source_table,
+        event_type,
+        review_content,
+    )
 
 
 def write_to_bytehouse(rows):
-    """批量写入 ByteHouse task_events。"""
     if not rows:
         return
+
+    db_name = safe_database_name(BH_DATABASE)
     port = int(BH_PORT) if BH_PORT else 19000
+
     client = Client(
         host=BH_HOST,
         port=port,
         user=BH_USER,
         password=BH_PASSWORD,
-        database=BH_DATABASE,
+        database=db_name,
         secure=True,
         verify=False,
         settings={"virtual_warehouse": BH_VW_ID},
     )
-    sql = """
-    INSERT INTO task_db.task_events
+
+    sql = f"""
+    INSERT INTO {db_name}.task_events
     (id, record_id, talent_id, event_time, source_table, event_type, content)
     VALUES
     """
@@ -176,39 +279,55 @@ def write_to_bytehouse(rows):
 
 
 def main():
-    required = [
-        ("BH_HOST", BH_HOST),
-        ("BH_PORT", BH_PORT),
-        ("BH_USER", BH_USER),
-        ("BH_PASSWORD", BH_PASSWORD),
-        ("BH_DATABASE", BH_DATABASE),
-        ("BH_VW_ID", BH_VW_ID),
-    ]
-    for name, val in required:
-        if not val:
-            print(f"错误: 未设置环境变量 {name}", file=sys.stderr)
-            sys.exit(1)
+    args = parse_args()
+    check_required_env()
 
-    print("1. 获取飞书 token ...")
+    print("===== 1. 读取本地结果文件 =====")
+    result_obj = read_json_file(args.result_file)
+    review_content = json_stringify(result_obj)
+    print(f"result 文件: {args.result_file}")
+    print(f"result 长度: {len(review_content)}")
+
+    print("===== 2. 读取 record 文件 =====")
+    record_data = read_json_file(args.record_file)
+    print(f"record 文件: {args.record_file}")
+
+    record_id = resolve_record_id(record_data)
+    print(f"解析得到 RECORD_ID: {record_id or '<空>'}")
+
+    if not record_id:
+        print("错误: 未获取到 RECORD_ID，无法精确回填飞书记录", file=sys.stderr)
+        sys.exit(1)
+
+    print("===== 3. 获取飞书 token =====")
     token = get_feishu_token()
 
-    print("2. 从飞书多维表格获取记录 ...")
-    if RECORD_ID:
-        record = feishu_get_record(token, RECORD_ID)
+    if not args.skip_feishu_update:
+        print("===== 4. 回填飞书 code_review_result =====")
+        update_fields = {
+            FEISHU_FIELD_CONTENT: review_content
+        }
+        feishu_update_record(token, record_id, update_fields)
+        print("飞书记录更新成功")
     else:
-        record = feishu_get_first_record(token)
-        if not record:
-            print("错误: 飞书表格暂无数据且未传 RECORD_ID", file=sys.stderr)
-            sys.exit(1)
+        print("===== 4. 跳过飞书更新 =====")
 
-    record_id = record.get("record_id", "")
-    print(f"    record_id: {record_id}")
+    print("===== 5. 拉取飞书记录，补齐入库字段 =====")
+    record = feishu_get_record(token, record_id)
+    print("飞书记录拉取成功")
 
-    print("3. 映射字段并写入 ByteHouse ...")
-    row = record_to_row(record)
+    print("===== 6. 组装 ByteHouse 数据 =====")
+    row = build_bytehouse_row(record, review_content)
+    print(f"row record_id={row[1]}")
+    print(f"row talent_id={row[2]}")
+    print(f"row source_table={row[4]}")
+    print(f"content length={len(row[6])}")
+
+    print("===== 7. 写入 ByteHouse =====")
     write_to_bytehouse([row])
-    print(f"    已写入 1 条: id={row[0]}, event_type=task_submit, content 长度={len(row[6])}")
-    print("完成。")
+    print(f"已写入 1 条数据，id={row[0]}")
+
+    print("===== 8. 完成 =====")
 
 
 if __name__ == "__main__":
