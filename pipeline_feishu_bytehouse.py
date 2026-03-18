@@ -5,13 +5,13 @@
 流程：连接飞书 + ByteHouse → 从飞书表格获取对应字段 → 映射后写入数据库。
 
 字段映射：
-  - id           = maidian_<随机 UUID>
+  - id           = 随机 UUID
   - record_id    = 飞书表格中的记录 ID
-  - talent_id    = 飞书字段「提交人ID」（列名可配置）
+  - talent_id    = 飞书列「千识TalentID」
   - event_time   = 当前时间
   - event_type   = task_submit
-  - source_table = feishu_bitable
-  - content      = 飞书字段「code_review_result」的内容
+  - source_table = 飞书列「版本」
+  - content      = 飞书列「code_review_result」
 
 运行（流水线自定义命令）:
   pip install requests clickhouse-driver -q && python pipeline_feishu_bytehouse.py
@@ -21,8 +21,9 @@
         APP_TOKEN/BITABLE_APP_TOKEN, COMMIT_TABLE_ID/BITABLE_TABLE_ID
   ByteHouse: BH_HOST, BH_PORT, BH_USER, BH_PASSWORD, BH_DATABASE, BH_VW_ID
   可选: RECORD_ID — 指定飞书记录 ID，不传则取第一页第一条
-        FEISHU_FIELD_TALENT_ID — 飞书表中「提交人ID」的列名，默认 提交人ID 或 talent_id
-        FEISHU_FIELD_CONTENT   — 飞书表中「机审结果」的列名，默认 code_review_result
+        FEISHU_FIELD_TALENT_ID    — talent_id 对应列名，默认 千识TalentID
+        FEISHU_FIELD_SOURCE_TABLE — source_table 对应列名，默认 版本
+        FEISHU_FIELD_CONTENT      — content 对应列名，默认 code_review_result
 """
 
 import json
@@ -64,8 +65,9 @@ BH_DATABASE = _env("BH_DATABASE")
 BH_VW_ID = _env("BH_VW_ID")
 
 RECORD_ID = _env("RECORD_ID")
-# 飞书列名：提交人ID、机审结果（若你表里列名不同，用环境变量覆盖）
-FEISHU_FIELD_TALENT_ID = _env("FEISHU_FIELD_TALENT_ID") or "提交人ID"
+# 飞书列名（可用环境变量覆盖）
+FEISHU_FIELD_TALENT_ID = _env("FEISHU_FIELD_TALENT_ID") or "千识TalentID"
+FEISHU_FIELD_SOURCE_TABLE = _env("FEISHU_FIELD_SOURCE_TABLE") or "版本"
 FEISHU_FIELD_CONTENT = _env("FEISHU_FIELD_CONTENT") or "code_review_result"
 DEFAULT_TALENT_ID = _env("DEFAULT_TALENT_ID") or "default_talent"
 
@@ -122,16 +124,18 @@ def record_to_row(record: dict) -> tuple:
     """
     record_id = record.get("record_id", "")
     fields = record.get("fields", {})
-    # 提交人ID：支持多种列名
-    talent_id = (
-        fields.get(FEISHU_FIELD_TALENT_ID)
-        or fields.get("talent_id")
-        or fields.get("提交人ID")
-        or DEFAULT_TALENT_ID
-    )
+    # talent_id = 多维表格「千识TalentID」列
+    talent_id = fields.get("千识TalentID")
     if isinstance(talent_id, dict):
         talent_id = talent_id.get("text") or str(talent_id)
     talent_id = str(talent_id).strip() if talent_id else DEFAULT_TALENT_ID
+
+    # source_table = 多维表格「版本」列
+    source_table = fields.get(FEISHU_FIELD_SOURCE_TABLE) or fields.get("版本") or "feishu_bitable"
+    if isinstance(source_table, dict):
+        source_table = source_table.get("text") or str(source_table)
+    source_table = str(source_table).strip() if source_table else "feishu_bitable"
+
     # content = code_review_result 字段内容
     content = fields.get(FEISHU_FIELD_CONTENT) or fields.get("code_review_result") or ""
     if isinstance(content, dict):
@@ -140,7 +144,6 @@ def record_to_row(record: dict) -> tuple:
 
     event_time = datetime.now()
     event_type = "task_submit"
-    source_table = "feishu_bitable"
     row_id =  str(uuid.uuid4())
 
     return (row_id, record_id, talent_id, event_time, source_table, event_type, content)
