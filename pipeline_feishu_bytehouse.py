@@ -66,10 +66,10 @@ BH_VW_ID = _env("BH_VW_ID")
 
 RECORD_ID = _env("RECORD_ID")
 # 飞书列名（可用环境变量覆盖）
-FEISHU_FIELD_TALENT_ID = _env("FEISHU_FIELD_TALENT_ID") or "千识TalentID"
-FEISHU_FIELD_SOURCE_TABLE = _env("FEISHU_FIELD_SOURCE_TABLE") or "版本"
-FEISHU_FIELD_CONTENT = _env("FEISHU_FIELD_CONTENT") or "code_review_result"
-DEFAULT_TALENT_ID = _env("DEFAULT_TALENT_ID") or "default_talent"
+FEISHU_FIELD_TALENT_ID = "千识TalentID"
+FEISHU_FIELD_SOURCE_TABLE = "版本"
+FEISHU_FIELD_CONTENT = "code_review_result"
+DEFAULT_TALENT_ID = "default_talent"
 
 
 def get_feishu_token() -> str:
@@ -129,16 +129,17 @@ def record_to_row(record: dict) -> tuple:
     if isinstance(talent_id, dict):
         talent_id = talent_id.get("text") or str(talent_id)
     talent_id = str(talent_id).strip() if talent_id else DEFAULT_TALENT_ID
+    print("talent_id内容:", talent_id)
 
     # source_table = 多维表格「版本」列
-    source_table = fields.get(FEISHU_FIELD_SOURCE_TABLE) or fields.get("版本") or "feishu_bitable"
+    source_table = fields.get(FEISHU_FIELD_SOURCE_TABLE)
     if isinstance(source_table, dict):
         source_table = source_table.get("text") or str(source_table)
-    source_table = str(source_table).strip() if source_table else "feishu_bitable"
+        source_table = str(source_table).strip() if source_table else "feishu_bitable"
 
     # content = code_review_result 字段内容
-    content = fields.get(FEISHU_FIELD_CONTENT) or fields.get("code_review_result") or ""
-    print(content)
+    content = fields.get(FEISHU_FIELD_CONTENT)
+    print("content内容:", content)
     if isinstance(content, dict):
         content = content.get("text") or json.dumps(content, ensure_ascii=False)
     content = str(content) if content else ""
