@@ -138,6 +138,7 @@ def record_to_row(record: dict) -> tuple:
 
     # content = code_review_result 字段内容
     content = fields.get(FEISHU_FIELD_CONTENT) or fields.get("code_review_result") or ""
+    print(content)
     if isinstance(content, dict):
         content = content.get("text") or json.dumps(content, ensure_ascii=False)
     content = str(content) if content else ""
@@ -175,10 +176,6 @@ def write_to_bytehouse(rows):
 
 def main():
     required = [
-        ("FEISHU_APP_ID", FEISHU_APP_ID),
-        ("FEISHU_APP_SECRET", FEISHU_APP_SECRET),
-        ("BITABLE_APP_TOKEN", BITABLE_APP_TOKEN),
-        ("BITABLE_TABLE_ID", BITABLE_TABLE_ID),
         ("BH_HOST", BH_HOST),
         ("BH_PORT", BH_PORT),
         ("BH_USER", BH_USER),
