@@ -90,7 +90,7 @@ PASS：关键标识符无拼写错误。FAIL：存在拼写错误。
 
 # 四、输出格式
 
-结构化结果须符合 JSON schema：顶层键 **rubrics_review_result**，内含 **review_suggestions**（审查建议文本）、**task_path**（可留空）、**criteria**（19 条，键名与上一致）、**summary**（passed/failed/na 数量及 failed_criteria 列表）。每条准则：`{ "outcome": "PASS|FAIL|N/A", "explanation": "理由" }`。
+给出中文的回复内容，结构化结果须符合 JSON schema：顶层键 **rubrics_review_result**，内含 **review_suggestions**（审查建议文本）、**task_path**（可留空）、**criteria**（19 条，键名与上一致）、**summary**（passed/failed/na 数量及 failed_criteria 列表）。每条准则：`{ "outcome": "PASS|FAIL|N/A", "explanation": "理由" }`。
 
 # 五、最终任务
 
