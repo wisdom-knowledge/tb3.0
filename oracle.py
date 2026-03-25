@@ -5,29 +5,27 @@ Import Tasks and Run Oracle - 本地/容器版
 功能:
 1. 从 TOS/HTTP URL 下载 zip (或使用当前目录已有 zip)
 2. 解压并导入任务到 tasks-dir
-3. 运行 harbor oracle agent
-4. 检查 oracle 结果
+3. 运行 Oracle：
+   - --runner tb（默认）: 对 Harbor 任务先 harbor2tbench 转为 TB 目录 (*-tbench)，再 tb run --agent oracle
+   - --runner harbor: 沿用 harbor run -e daytona -a oracle（旧逻辑）
+4. 检查 oracle 结果（TB: results.json；Harbor: result.json）
 5. 打包产物到 ./artifacts/
 6. 输出 return.json (oracle_pass_bool, oracle_log_url)
 
-环境变量: VE_TOS_AK, VE_TOS_SK (TOS 下载时需要)
-后置步骤 (由流水线编排): TOS 上传 ./artifacts/ 下的产物
+环境变量:
+  VE_TOS_AK, VE_TOS_SK (TOS 下载时需要)
+  TB_ORACLE_CMD: 可选，覆盖 tb 调用方式，如 "tb" 或 "uv run tb"（默认 "tb"）
 
 用法:
-  python seta/oracle.py \
-    --record-id "recXXX" \
-    --zip-url "tos://bucket/path/tasks.zip" \
-    --tos-endpoint "https://tos-cn-beijing.volces.com" \
-    --tos-region "cn-beijing" \
-    [--tasks-dir tasks2] \
-    [--parallel 4] \
-    [--k-shots 1]
+  python oracle.py --record-id "recXXX" --zip-url "https://..." ...
+  python oracle.py --record-id "recXXX" --runner harbor ...   # 仅 Harbor
 """
 
 import argparse
 import json
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -48,6 +46,20 @@ logging.basicConfig(
 log = logging.getLogger("run_oracle")
 
 ARTIFACTS_DIR = "./artifacts"
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parent
+
+
+def default_harbor2tbench_script() -> Path:
+    return _repo_root() / "harbor2tbbench" / "harbor2tbench.py"
+
+
+def tb_oracle_invoker() -> list[str]:
+    """tb 可执行前缀，如 ['tb'] 或 ['uv','run','tb']。"""
+    raw = os.environ.get("TB_ORACLE_CMD", "tb")
+    return shlex.split(raw, posix=os.name != "nt")
 
 
 def upload_to_tos(
@@ -150,12 +162,12 @@ def find_task_zip() -> str:
     return str(zips[0])
 
 
-def extract_and_import_tasks(zip_path: str, tasks_dir: str) -> list[str]:
+def extract_and_import_tasks(zip_path: str, tasks_dir: str) -> list[tuple[str, str]]:
     """
-    解压 zip 并将任务复制到 tasks_dir
+    解压 zip 并将任务复制到 tasks_dir。
 
     Returns:
-        导入的任务名称列表
+        [(任务目录名, 类型), ...]，类型为 \"harbor\"（含 task.toml）或 \"tb\"（仅 task.yaml，已为 TB 布局）
     """
     extract_dir = tempfile.mkdtemp(prefix="extracted_tasks_")
     try:
@@ -163,46 +175,82 @@ def extract_and_import_tasks(zip_path: str, tasks_dir: str) -> list[str]:
         with zipfile.ZipFile(zip_path, "r") as zf:
             zf.extractall(extract_dir)
 
-        task_tomls: list[Path] = []
         extract_path = Path(extract_dir)
-        for depth_pattern in ["task.toml", "*/task.toml", "*/*/task.toml"]:
-            task_tomls.extend(extract_path.glob(depth_pattern))
+        depth_patterns = ["", "*/", "*/*/"]
 
-        if not task_tomls:
-            raise RuntimeError("zip 文件中未找到 task.toml")
+        harbor_roots: set[Path] = set()
+        for prefix in depth_patterns:
+            for f in extract_path.glob(prefix + "task.toml"):
+                harbor_roots.add(f.parent.resolve())
 
-        log.info(f"找到 {len(task_tomls)} 个 task.toml")
+        tb_only_roots: set[Path] = set()
+        for prefix in depth_patterns:
+            for f in extract_path.glob(prefix + "task.yaml"):
+                parent = f.parent.resolve()
+                if parent in harbor_roots:
+                    continue
+                if (parent / "task.toml").exists():
+                    continue
+                tb_only_roots.add(parent)
 
-        imported: list[str] = []
+        if not harbor_roots and not tb_only_roots:
+            raise RuntimeError("zip 中未找到 task.toml 或 task.yaml")
+
         tasks_path = Path(tasks_dir)
+        imported: list[tuple[str, str]] = []
 
-        for toml_file in task_tomls:
-            task_src_dir = toml_file.parent
+        def copy_one(task_src_dir: Path, kind: str) -> None:
             task_name = task_src_dir.name
-
             dest_dir = tasks_path / task_name
             if dest_dir.exists():
                 log.warning(f"任务 '{task_name}' 已存在，将被覆盖")
                 shutil.rmtree(dest_dir)
-
             shutil.copytree(task_src_dir, dest_dir)
-            log.info(f"已导入: {task_name}")
-            imported.append(task_name)
+            log.info(f"已导入 ({kind}): {task_name}")
+            imported.append((task_name, kind))
+
+        for p in sorted(harbor_roots, key=lambda x: str(x)):
+            copy_one(p, "harbor")
+
+        for p in sorted(tb_only_roots, key=lambda x: str(x)):
+            if p in harbor_roots:
+                continue
+            copy_one(p, "tb")
 
         if not imported:
             raise RuntimeError("没有成功导入任何任务")
 
-        log.info(f"共导入 {len(imported)} 个任务: {', '.join(imported)}")
+        log.info(
+            f"共导入 {len(imported)} 个任务: "
+            + ", ".join(f"{n}({k})" for n, k in imported)
+        )
         return imported
 
     finally:
         shutil.rmtree(extract_dir, ignore_errors=True)
 
 
+def run_harbor2tbench(
+    harbor_task_dir: Path,
+    tb_out_dir: Path,
+    script_path: Path,
+) -> None:
+    """调用 harbor2tbench.py：Harbor 目录 -> TB 目录（与 CLI 默认一致：dst 为独立目录）。"""
+    if not script_path.is_file():
+        raise FileNotFoundError(f"未找到 harbor2tbench: {script_path}")
+
+    if tb_out_dir.exists():
+        shutil.rmtree(tb_out_dir)
+
+    cmd = [sys.executable, str(script_path), str(harbor_task_dir), str(tb_out_dir)]
+    log.info(f"harbor2tbench: {' '.join(cmd)}")
+    subprocess.run(cmd, check=True)
+
+
 # ──────────────────────────── Harbor Oracle ────────────────────────────
 
 
-def run_oracle(
+def run_harbor_oracle(
     tasks_dir: str,
     task_names: list[str],
     run_id: str,
@@ -210,10 +258,10 @@ def run_oracle(
     k_shots: int = 1,
 ) -> tuple[str, bool]:
     """
-    运行 harbor oracle agent
+    运行 harbor oracle agent（Harbor + daytona）。
 
     Returns:
-        (run_dir, success)
+        (run_dir, subprocess_success)
     """
     run_dir = f"runs/tb3-oracle-{run_id}"
 
@@ -247,9 +295,54 @@ def run_oracle(
     return run_dir, success
 
 
-def check_oracle_results(run_dir: str) -> tuple[bool, dict]:
+def run_tb_oracle(
+    tasks_dir: str,
+    tb_task_ids: list[str],
+    run_id: str,
+    k_shots: int = 1,
+) -> tuple[str, bool]:
     """
-    检查 oracle 运行结果
+    Terminal-Bench: tb run --agent oracle，数据集目录为 tasks_dir（内含 *-tbench 等任务子目录）。
+
+    Returns:
+        (run_dir, subprocess_success 全部为 0)
+    """
+    run_dir = f"runs/tb3-oracle-{run_id}"
+    Path(run_dir).mkdir(parents=True, exist_ok=True)
+
+    dataset_path = str(Path(tasks_dir).resolve())
+    output_path = str(Path(run_dir).resolve())
+    invoker = tb_oracle_invoker()
+
+    all_ok = True
+    for task_id in tb_task_ids:
+        cmd = invoker + [
+            "run",
+            "--dataset-path",
+            dataset_path,
+            "--agent",
+            "oracle",
+            "--n-attempts",
+            str(k_shots),
+            "--output-path",
+            output_path,
+            "--task-id",
+            task_id,
+        ]
+        log.info(f"运行 tb oracle: {' '.join(cmd)}")
+        result = subprocess.run(cmd, text=True)
+        if result.returncode != 0:
+            log.error(
+                f"tb run 失败 task_id={task_id} (exit code: {result.returncode})"
+            )
+            all_ok = False
+
+    return run_dir, all_ok
+
+
+def check_harbor_oracle_results(run_dir: str) -> tuple[bool, dict]:
+    """
+    检查 Harbor oracle 运行结果（result.json，含 n_total_trials）。
 
     Returns:
         (oracle_passed, summary_dict)
@@ -259,7 +352,7 @@ def check_oracle_results(run_dir: str) -> tuple[bool, dict]:
     job_result_file = None
     for f in result_files:
         try:
-            data = json.loads(f.read_text())
+            data = json.loads(f.read_text(encoding="utf-8"))
             if "n_total_trials" in data:
                 job_result_file = f
                 break
@@ -271,7 +364,7 @@ def check_oracle_results(run_dir: str) -> tuple[bool, dict]:
         return False, {"error": "未找到 result.json"}
 
     log.info(f"结果文件: {job_result_file}")
-    data = json.loads(job_result_file.read_text())
+    data = json.loads(job_result_file.read_text(encoding="utf-8"))
 
     n_total_trials = data.get("n_total_trials", 0)
     n_errors = data.get("stats", {}).get("n_errors", 0)
@@ -285,6 +378,7 @@ def check_oracle_results(run_dir: str) -> tuple[bool, dict]:
     mean_score = sum(means) / len(means) if means else 0
 
     summary = {
+        "runner": "harbor",
         "n_total_trials": n_total_trials,
         "n_errors": n_errors,
         "mean_score": mean_score,
@@ -305,6 +399,111 @@ def check_oracle_results(run_dir: str) -> tuple[bool, dict]:
         log.error(f"Oracle 未通过: {', '.join(reasons)}")
 
     return passed, summary
+
+
+def check_tb_oracle_results(run_dir: str) -> tuple[bool, dict]:
+    """
+    检查 Terminal-Bench oracle 结果：run_dir 下各时间戳目录中的 results.json。
+    通过条件：每个 results.json 均 n_unresolved==0 且 accuracy==1.0。
+    """
+    result_files = sorted(
+        Path(run_dir).rglob("results.json"),
+        key=lambda p: p.stat().st_mtime,
+    )
+
+    if not result_files:
+        log.error("未找到 results.json（Terminal-Bench 输出）")
+        return False, {"error": "未找到 results.json", "runner": "tb"}
+
+    passed_all = True
+    per_file: list[dict] = []
+    n_resolved_total = 0
+    n_unresolved_total = 0
+
+    for f in result_files:
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as e:
+            log.error(f"无法解析 {f}: {e}")
+            passed_all = False
+            per_file.append({"file": str(f), "ok": False, "error": str(e)})
+            continue
+
+        n_unresolved = int(data.get("n_unresolved", 1))
+        n_resolved = int(data.get("n_resolved", 0))
+        accuracy = float(data.get("accuracy", 0.0))
+
+        n_resolved_total += n_resolved
+        n_unresolved_total += n_unresolved
+
+        ok = n_unresolved == 0 and accuracy >= 1.0 - 1e-9
+        if not ok:
+            passed_all = False
+            for trial in data.get("results", []):
+                if trial.get("is_resolved") is not True:
+                    log.error(
+                        f"  未解决 trial: task_id={trial.get('task_id')}, "
+                        f"failure_mode={trial.get('failure_mode')}"
+                    )
+
+        per_file.append(
+            {
+                "file": str(f),
+                "ok": ok,
+                "n_resolved": n_resolved,
+                "n_unresolved": n_unresolved,
+                "accuracy": accuracy,
+            }
+        )
+        log.info(
+            f"TB 结果 {f.name}: resolved={n_resolved}, unresolved={n_unresolved}, "
+            f"accuracy={accuracy}"
+        )
+
+    summary = {
+        "runner": "tb",
+        "n_resolved_total": n_resolved_total,
+        "n_unresolved_total": n_unresolved_total,
+        "result_files": [str(f) for f in result_files],
+        "per_file": per_file,
+        "mean_score": 1.0 if passed_all else 0.0,
+        "n_total_trials": n_resolved_total + n_unresolved_total,
+        "n_errors": n_unresolved_total,
+    }
+
+    if passed_all:
+        log.info("Terminal-Bench Oracle 通过: 全部 results.json 满足 accuracy=1 且 n_unresolved=0")
+    else:
+        log.error("Terminal-Bench Oracle 未通过: 存在失败的 results.json 或未解决 trial")
+
+    return passed_all, summary
+
+
+def build_tb_task_ids(
+    imported: list[tuple[str, str]],
+    tasks_dir: Path,
+    no_convert: bool,
+    harbor2tbench_script: Path,
+) -> list[str]:
+    """
+    Harbor 任务 -> harbor2tbench -> 目录名 {name}-tbench；
+    已为 TB 的任务（仅 task.yaml）-> task_id 为导入目录名。
+    """
+    tb_ids: list[str] = []
+    for name, kind in imported:
+        src = tasks_dir / name
+        if kind == "harbor":
+            if no_convert:
+                raise RuntimeError(
+                    f"任务 {name} 为 Harbor(task.toml)，不能使用 --no-convert。"
+                    "请去掉 --no-convert 以自动执行 harbor2tbench，或改为上传已转换的 TB 任务 zip（仅 task.yaml）。"
+                )
+            dst = tasks_dir / f"{name}-tbench"
+            run_harbor2tbench(src, dst, harbor2tbench_script)
+            tb_ids.append(dst.name)
+        else:
+            tb_ids.append(name)
+    return tb_ids
 
 
 def pack_artifacts(run_dir: str, record_id: str) -> str:
@@ -332,17 +531,39 @@ def pack_artifacts(run_dir: str, record_id: str) -> str:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Import Tasks and Run Oracle",
+        description="Import Tasks and Run Oracle（支持 Harbor 与 Terminal-Bench）",
     )
     parser.add_argument(
         "--record-id", required=True, help="记录 ID，用于 run_id 和产物文件名"
     )
     parser.add_argument("--tasks-dir", default="tasks2", help="任务目录 (默认 tasks2)")
     parser.add_argument(
+        "--runner",
+        choices=("tb", "harbor"),
+        default="tb",
+        help="tb: harbor2tbench 转换后执行 tb run --agent oracle（默认）；"
+        "harbor: 仍用 harbor run -e daytona",
+    )
+    parser.add_argument(
+        "--no-convert",
+        action="store_true",
+        help="仅 --runner tb：zip 内已是 TB 任务（task.yaml），跳过 harbor2tbench",
+    )
+    parser.add_argument(
+        "--harbor2tbench-script",
+        type=Path,
+        default=None,
+        help="harbor2tbench.py 路径（默认同仓库 harbor2tbbench/harbor2tbench.py）",
+    )
+    parser.add_argument(
         "--parallel", "-n", type=int, default=4, help="harbor 并行数 (默认 4)"
     )
     parser.add_argument(
-        "--k-shots", "-k", type=int, default=1, help="harbor k-shots (默认 1)"
+        "--k-shots",
+        "-k",
+        type=int,
+        default=1,
+        help="harbor 的 k-shots；tb 模式下对应 --n-attempts (默认 1)",
     )
     parser.add_argument(
         "--zip-url",
@@ -372,8 +593,10 @@ def main():
     )
     args = parser.parse_args()
 
+    h2t_script = args.harbor2tbench_script or default_harbor2tbench_script()
+
     run_id = f"{args.record_id}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}"
-    log.info(f"=== 开始 Oracle 运行 (run_id={run_id}) ===")
+    log.info(f"=== 开始 Oracle 运行 (run_id={run_id}, runner={args.runner}) ===")
 
     # ── Step 0: 下载任务包 (如果提供了 URL) ──
     if args.zip_url:
@@ -395,24 +618,56 @@ def main():
     try:
         if zip_path is None:
             zip_path = find_task_zip()
-        task_names = extract_and_import_tasks(zip_path, args.tasks_dir)
+        imported = extract_and_import_tasks(zip_path, args.tasks_dir)
     except Exception as e:
         log.error(f"任务导入失败: {e}")
         sys.exit(1)
 
+    tasks_path = Path(args.tasks_dir)
+
     # ── Step 2: 运行 oracle ──
-    log.info("── Step 2: 运行 harbor oracle ──")
-    run_dir, harbor_success = run_oracle(
-        tasks_dir=args.tasks_dir,
-        task_names=task_names,
-        run_id=run_id,
-        parallel=args.parallel,
-        k_shots=args.k_shots,
-    )
+    if args.runner == "harbor":
+        log.info("── Step 2: 运行 harbor oracle ──")
+        task_names_only = [n for n, _ in imported]
+        run_dir, run_ok = run_harbor_oracle(
+            tasks_dir=args.tasks_dir,
+            task_names=task_names_only,
+            run_id=run_id,
+            parallel=args.parallel,
+            k_shots=args.k_shots,
+        )
+        if not run_ok:
+            log.error("harbor 进程返回非 0")
+    else:
+        log.info("── Step 2a: Harbor -> Terminal-Bench（harbor2tbench）──")
+        try:
+            tb_task_ids = build_tb_task_ids(
+                imported,
+                tasks_path,
+                no_convert=args.no_convert,
+                harbor2tbench_script=h2t_script,
+            )
+        except Exception as e:
+            log.error(f"转换/解析 TB task_id 失败: {e}")
+            sys.exit(1)
+
+        log.info(f"TB task_id 列表: {tb_task_ids}")
+        log.info("── Step 2b: 运行 tb oracle ──")
+        run_dir, run_ok = run_tb_oracle(
+            tasks_dir=args.tasks_dir,
+            tb_task_ids=tb_task_ids,
+            run_id=run_id,
+            k_shots=args.k_shots,
+        )
+        if not run_ok:
+            log.error("tb run 存在失败（非 0 退出码）")
 
     # ── Step 3: 检查结果 ──
     log.info("── Step 3: 检查 oracle 结果 ──")
-    oracle_passed, summary = check_oracle_results(run_dir)
+    if args.runner == "harbor":
+        oracle_passed, summary = check_harbor_oracle_results(run_dir)
+    else:
+        oracle_passed, summary = check_tb_oracle_results(run_dir)
 
     # ── Step 4: 打包产物 ──
     log.info("── Step 4: 打包产物 ──")
@@ -437,7 +692,10 @@ def main():
     # ── 输出汇总 ──
     log.info("=" * 50)
     log.info("Oracle 运行汇总:")
-    log.info(f"  导入任务: {', '.join(task_names)}")
+    log.info(f"  runner:   {args.runner}")
+    log.info(
+        f"  导入任务: {', '.join(f'{n}({k})' for n, k in imported)}"
+    )
     log.info(f"  总试验数: {summary.get('n_total_trials', 'N/A')}")
     log.info(f"  错误数:   {summary.get('n_errors', 'N/A')}")
     log.info(f"  平均分:   {summary.get('mean_score', 'N/A')}")
@@ -454,7 +712,8 @@ def main():
         args.oracle_log_field: oracle_log_value,
     }
     Path("return.json").write_text(
-        json.dumps(result_output, ensure_ascii=False, indent=2)
+        json.dumps(result_output, ensure_ascii=False, indent=2),
+        encoding="utf-8",
     )
     log.info(f"return.json 已写入: {result_output}")
 
