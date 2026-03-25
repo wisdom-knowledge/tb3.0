@@ -474,7 +474,5 @@ def main() -> None:
     log.info("return.json 已写入: %s", result_output)
 
 
-
-
 if __name__ == "__main__":
     main()
