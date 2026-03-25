@@ -11,25 +11,36 @@ pwd
 echo "【步骤1】当前目录文件列表："
 ls -la || true
 
-echo "【步骤2】检查 Python 环境..."
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "【错误】未找到 python3，无法继续执行"
+echo "【步骤2】检查 Python 环境（terminal-bench 要求 Python >= 3.12）..."
+PYTHON_BIN=""
+for _cand in python3.13 python3.12 python3; do
+  if command -v "${_cand}" >/dev/null 2>&1; then
+    if "${_cand}" -c "import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)" 2>/dev/null; then
+      PYTHON_BIN="$(command -v "${_cand}")"
+      break
+    fi
+  fi
+done
+if [ -z "${PYTHON_BIN}" ]; then
+  echo "【错误】未找到 Python >= 3.12。PyPI 上 terminal-bench 不支持 3.11 及以下。"
+  echo "请在镜像/Runner 中安装 python3.12+（例如 apt install python3.12 / 使用官方 python:3.12 镜像）。"
+  command -v python3 >/dev/null 2>&1 && python3 --version || true
   exit 1
 fi
-echo "【信息】python3 路径：$(which python3)"
-python3 --version || true
+echo "【信息】将使用: ${PYTHON_BIN}"
+"${PYTHON_BIN}" --version
 
 echo "【步骤3】安装 Oracle 校验脚本依赖（含 terminal-bench）..."
-python3 -m ensurepip --upgrade 2>/dev/null || true
-python3 -m pip install --upgrade pip --index-url=https://mirrors.aliyun.com/pypi/simple/ 2>/dev/null || \
-python3 -m pip install --upgrade pip --index-url=https://pypi.org/simple/
-python3 -m pip install --user python-dotenv requests tos terminal-bench --index-url=https://mirrors.aliyun.com/pypi/simple/ || \
-python3 -m pip install --user python-dotenv requests tos terminal-bench --index-url=https://pypi.org/simple/
+"${PYTHON_BIN}" -m ensurepip --upgrade 2>/dev/null || true
+"${PYTHON_BIN}" -m pip install --upgrade pip --index-url=https://mirrors.aliyun.com/pypi/simple/ 2>/dev/null || \
+"${PYTHON_BIN}" -m pip install --upgrade pip --index-url=https://pypi.org/simple/
+"${PYTHON_BIN}" -m pip install --user python-dotenv requests tos terminal-bench --index-url=https://mirrors.aliyun.com/pypi/simple/ || \
+"${PYTHON_BIN}" -m pip install --user python-dotenv requests tos terminal-bench --index-url=https://pypi.org/simple/
 
 export PATH="${HOME}/.local/bin:/workspace/.local/bin:${PATH}"
 
 echo "【步骤3.1】校验 Python 依赖是否安装成功..."
-python3 - <<'PY'
+"${PYTHON_BIN}" - <<'PY'
 import sys
 print("当前 Python 可执行文件:", sys.executable)
 for m in ("dotenv", "requests", "tos"):
@@ -101,7 +112,7 @@ fi
 echo "【信息】将使用脚本：${ORACLE_SCRIPT}"
 
 echo "【步骤7】开始执行 Oracle 校验脚本..."
-python3 "${ORACLE_SCRIPT}" \
+"${PYTHON_BIN}" "${ORACLE_SCRIPT}" \
   --record-id "${RECORD_ID}" \
   --zip-url "${ZIP_URL}" \
   --tos-endpoint "${TOS_ENDPOINT}" \
