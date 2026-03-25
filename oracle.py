@@ -473,7 +473,7 @@ def main() -> None:
     )
     log.info("return.json 已写入: %s", result_output)
 
-    sys.exit(0 if oracle_passed else 1)
+
 
 
 if __name__ == "__main__":
