@@ -1,0 +1,352 @@
+instruction: |-
+  # SpiceDB 授权链路修复
+  
+  你在修一个已经上线的授权系统，不是从空目录临时写一个 demo。
+  
+  系统由 4 个组件组成：
+  
+  - `gateway` 对外暴露 `0.0.0.0:8080`
+  - `main` 是待修复的 Node.js 服务，监听 `0.0.0.0:8081`
+  - `spicedb` 是授权中间件，HTTP API 暴露在 `http://spicedb:8443`
+  - `postgres` 是 SpiceDB 的持久化后端
+  
+  验证器只会通过网关访问你的业务接口，但也会直接检查 SpiceDB 中的 schema 和 relationships。
+  
+  ## 初始环境
+  
+  - `/app` 中已经有一个半成品服务
+  - 当前服务存在真实缺陷，不要绕开现有结构重写成另一套栈
+  - 动态状态需要持久化到 `/data`
+  - `main` 进程重启后，服务必须恢复动态状态
+  - 不要依赖联网安装额外依赖；使用 Node.js 标准库和系统已有工具完成即可
+  
+  ## 严格要求
+  
+  1. 保留现有 Node.js 服务结构，继续使用 `/app` 中已有文件
+  2. 不要把系统改成纯本地内存遍历授权
+  3. 必须使用 SpiceDB HTTP API 维护授权关系
+  4. 必须把 SpiceDB schema 写入或校验到位
+  5. 对外端口仍然只能是网关 `8080`
+  6. `main` 服务仍然必须监听 `0.0.0.0:8081`
+  7. 动态角色、授权、绑定、继承后的结果必须立即生效
+  8. 动态状态必须在 `main` 进程重启后恢复
+  9. 不允许通过硬编码 verifier 样例绕过题目
+  10. 现有运维重启接口必须保留并继续可用：
+     - `POST /internal/ops/restart`
+     - 请求头必须包含 `X-Harbor-Op: restart`
+     - 成功响应返回非 `5xx`，随后服务进程会被拉起并恢复
+  
+  ## SpiceDB 访问约束
+  
+  - SpiceDB preshared key 固定为：`devtoken`
+  - 访问 SpiceDB HTTP API 时必须带：
+  
+  ```http
+  Authorization: Bearer devtoken
+  ```
+  
+  ## 固定 SpiceDB Schema
+  
+  你必须使用下面这份固定 schema，不要自行改成其他模型：
+  
+  ```zed
+  definition user {}
+  
+  definition role {
+    relation member: user
+    relation child: role
+    permission assignee = member + child->assignee
+  }
+  
+  definition policy {
+    relation allowed_user: user
+    relation allowed_role: role#assignee
+    relation denied_user: user
+    relation denied_role: role#assignee
+    permission allow = allowed_user + allowed_role
+    permission deny = denied_user + denied_role
+  }
+  ```
+  
+  ## 固定对象命名
+  
+  SpiceDB 中的对象类型必须是：
+  
+  - 用户对象：`objectType = "user"`，`objectId = "<userId>"`
+  - 角色对象：`objectType = "role"`，`objectId = "<roleName>"`
+  - `policy` 对象：`objectType = "policy"`
+  - 用户规则对象：`objectId = "user=<userId>|<encodedPermission>"`
+  - 角色规则对象：`objectId = "role=<roleName>|<encodedPermission>"`
+  
+  其中 `<encodedPermission>` 是可写入 SpiceDB `objectId` 的固定编码：
+  
+  - allow 规则：`allow=<resource>=<action>`
+  - deny 规则：`deny=<resource>=<action>`
+  - 其中原始权限里的 `*` 必须编码成 `wildcard`
+  
+  例如：
+  
+  - `posts:read` -> `allow=posts=read`
+  - `!posts:delete` -> `deny=posts=delete`
+  - `users:*` -> `allow=users=wildcard`
+  - `*:*` -> `allow=wildcard=wildcard`
+  
+  ## 固定 Relationship 写入约定
+  
+  - 用户绑定角色：
+    - `role:<roleName>#member@user:<userId>`
+  - 角色继承：
+    - `role:<parentRole>#child@role:<childRole>`
+  - 用户 allow 规则：
+    - `policy:user=<userId>|allow=<encodedResource>=<encodedAction>#allowed_user@user:<userId>`
+  - 用户 deny 规则：
+    - `policy:user=<userId>|deny=<encodedResource>=<encodedAction>#denied_user@user:<userId>`
+  - 角色 allow 规则：
+    - `policy:role=<roleName>|allow=<encodedResource>=<encodedAction>#allowed_role@role:<roleName>#assignee`
+  - 角色 deny 规则：
+    - `policy:role=<roleName>|deny=<encodedResource>=<encodedAction>#denied_role@role:<roleName>#assignee`
+  
+  验证器会通过 SpiceDB HTTP API 检查：
+  
+  - schema 已经写入
+  - 初始种子 relationships 已经写入
+  - 动态变更后的 relationships 已经写入
+  - 重启后 relationships 仍然存在且可继续使用
+  
+  ## 允许修改
+  
+  - `/app/package.json`
+  - `/app/solve.sh`
+  - `/app/server.js`
+  - `/app/rbac.js`
+  - `/app/rule-utils.js`
+  - `/app/validation.js`
+  - `/app/spicedb-client.js`
+  - `/app/state-store.js`
+  - 你也可以在 `/app` 下新增辅助文件
+  
+  ## 权限规则格式
+  
+  - allow: `resource:action`
+  - deny: `!resource:action`
+  - wildcard: `*`
+  
+  示例：
+  
+  - `posts:read`
+  - `users:*`
+  - `!*:delete`
+  
+  ## 判定规则
+  
+  `POST /api/check-permission` 的最终结果必须按以下优先级确定：
+  
+  1. 用户直接规则优先于任何角色来源规则
+  2. 在同一来源类别内，先比较资源具体度：精确资源高于 `*`
+  3. 资源具体度相同，再比较动作具体度：精确动作高于 `*`
+  4. 具体度都相同，`deny` 高于 `allow`
+  5. 没有匹配规则时默认 `deny`
+  
+  这里的“来源”指规则真正定义的位置，而不是用户最外层绑定到的角色名。
+  
+  ## 初始数据
+  
+  用户：
+  
+  - `admin` -> `admin`
+  - `editor1` -> `editor`
+  - `viewer1` -> `viewer`
+  - `multiuser` -> `editor`, `viewer`
+  
+  角色：
+  
+  - `admin`: `*:*`
+  - `editor`: `posts:read`, `posts:write`，继承 `viewer`
+  - `viewer`: `posts:read`
+  
+  所有用户初始直接权限为空。
+  
+  ## API
+  
+  ### `POST /api/check-permission`
+  
+  请求：
+  
+  ```json
+  {"userId":"string","resource":"string","action":"string","explain":false}
+  ```
+  
+  默认响应：
+  
+  ```json
+  {"allowed":true}
+  ```
+  
+  当 `explain=true` 时，必须返回：
+  
+  ```json
+  {
+    "allowed": true,
+    "matchedRule": "reports:*",
+    "source": "role:auditor"
+  }
+  ```
+  
+  要求：
+  
+  - `matchedRule` 是最终生效的那条规则
+  - `source` 只能是 `user:<userId>`、`role:<roleName>` 或 `null`
+  - `source` 表示该规则真正定义在哪个用户或角色上
+  - 决策结果必须由 SpiceDB relationships 支撑，而不是只靠本地角色遍历
+  - 没有任何匹配规则时必须返回：
+  
+  ```json
+  {"allowed":false,"matchedRule":null,"source":null}
+  ```
+  
+  ### `GET /api/users/:id/permissions`
+  
+  默认响应：
+  
+  ```json
+  {"permissions":["posts:read","posts:write"]}
+  ```
+  
+  要求：
+  
+  - 包含用户直接规则
+  - 包含角色及递归继承得到的规则
+  - 去重
+  - 稳定排序
+  
+  当 query 参数 `details=true` 时，必须改为：
+  
+  ```json
+  {
+    "permissions": [
+      {
+        "permission": "posts:read",
+        "sources": ["role:editor", "role:viewer"]
+      }
+    ]
+  }
+  ```
+  
+  要求：
+  
+  - `sources` 列出该规则全部真实来源
+  - 来源格式与 `source` 一致：`user:<userId>` 或 `role:<roleName>`
+  - `sources` 去重并稳定排序
+  - `permissions` 按 `permission` 字段稳定排序
+  
+  ### `POST /api/roles/:role/grant`
+  
+  请求：
+  
+  ```json
+  {"permission":"!posts:delete"}
+  ```
+  
+  成功响应必须是：
+  
+  ```json
+  {"success":true}
+  ```
+  
+  ### `POST /api/users/:id/grant`
+  
+  请求：
+  
+  ```json
+  {"permission":"posts:read"}
+  ```
+  
+  成功响应必须是：
+  
+  ```json
+  {"success":true}
+  ```
+  
+  ### `POST /api/roles`
+  
+  请求：
+  
+  ```json
+  {
+    "role": "auditor",
+    "permissions": ["logs:read", "!logs:delete"],
+    "inherits": ["viewer"]
+  }
+  ```
+  
+  要求：
+  
+  - `role` 必填
+  - `permissions`、`inherits` 默认空数组
+  - 引用不存在的父角色时返回非 `200`
+  - 已存在角色返回非 `200`
+  - 成功响应必须是 `{"success":true}`
+  
+  ### `POST /api/users/:id/roles`
+  
+  请求：
+  
+  ```json
+  {"role":"auditor"}
+  ```
+  
+  要求：
+  
+  - 用户不存在时返回非 `200`
+  - 角色不存在时返回非 `200`
+  - 重复绑定不产生重复数据
+  - 成功响应必须是 `{"success":true}`
+  
+  ### `POST /api/roles/:role/inherit`
+  
+  请求：
+  
+  ```json
+  {"parent":"viewer"}
+  ```
+  
+  要求：
+  
+  - 角色不存在时返回非 `200`
+  - 父角色不存在时返回非 `200`
+  - 不允许任何深度的循环继承
+  - 重复追加相同父角色不产生重复数据
+  - 成功响应必须是 `{"success":true}`
+  
+  ## 持久化恢复要求
+  
+  - 动态角色、动态授权、动态绑定、动态继承必须在 `main` 重启后恢复
+  - 恢复后不能出现重复数据
+  - 恢复后 `matchedRule` 和 `source` 仍然必须正确
+  - 恢复后仍然要继续支持新的动态修改
+  
+  ## 额外说明
+  
+  - 你可以把辅助元数据持久化到 `/data`
+  - 但授权关系本身必须同步写入 SpiceDB
+  - 不要把 SpiceDB 只当作“摆设”或只写一份固定 schema 却不维护 relationships
+
+author_email: "system@example.com"
+difficulty: hard
+tags:
+  - rbac
+  - permission
+  - authorization
+  - role-management
+  - access-control
+  - gateway
+  - spicedb
+  - postgres
+  - middleware
+  - persistence
+  - recovery
+  - provenance
+  - zanzibar
+  - rebac
+max_agent_timeout_sec: 21600
+max_test_timeout_sec: 3600

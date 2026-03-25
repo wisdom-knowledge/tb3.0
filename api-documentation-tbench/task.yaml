@@ -1,0 +1,140 @@
+instruction: |-
+  # API 文档修复任务
+  
+  ## 任务背景
+  
+  `/app` 目录里已经有一个半成品 Node.js 服务。
+  
+  它负责提供用户相关 HTTP API，并暴露 `GET /api/docs` 返回 OpenAPI 3.0 文档。当前代码可以启动，但实现明显不完整，存在下面几类问题：
+  
+  - 文档与真实行为不一致
+  - 参数校验缺失或错误
+  - OpenAPI 路径格式不规范
+  - 查询参数约束没有正确落到运行时和文档里
+  
+  你的任务是修复现有代码，使服务行为和 OpenAPI 文档保持一致，而不是临时写一个只为过测试的脚本。
+  
+  服务必须监听 `0.0.0.0:8080`，verifier 会通过 `http://localhost:8080` 访问。
+  
+  ## 代码结构
+  
+  当前目录下已经有这些文件：
+  
+  - `solve.sh`
+  - `src/server.js`
+  - `src/store.js`
+  - `src/validation.js`
+  - `src/openapi.js`
+  
+  请直接修复这些现有文件，必要时也可以新增辅助文件，但不要把题目改成一次性生成完整答案的脚本题。
+  
+  ## 业务接口要求
+  
+  ### 1. `POST /api/users`
+  
+  创建用户。
+  
+  请求 JSON：
+  
+  ```json
+  {
+    "name": "string, required, min length 1",
+    "email": "string, required, valid email format",
+    "age": "integer, optional, if provided must be between 1 and 150",
+    "role": "string, optional, one of viewer/editor/admin, default viewer"
+  }
+  ```
+  
+  响应要求：
+  
+  - 成功返回 `201`
+  - 非法请求返回 `400`
+  
+  ### 2. `GET /api/users/{id}`
+  
+  按 id 获取用户。
+  
+  响应要求：
+  
+  - 成功返回 `200`
+  - 用户不存在返回 `404`
+  
+  ### 3. `PUT /api/users/{id}`
+  
+  部分更新用户。
+  
+  允许更新字段：
+  
+  - `name`
+  - `email`
+  - `age`
+  - `role`
+  
+  如果字段被提供，校验规则必须与创建接口保持一致。
+  
+  响应要求：
+  
+  - 成功返回 `200`
+  - 非法请求返回 `400`
+  - 用户不存在返回 `404`
+  
+  ### 4. `GET /api/users/{id}/posts`
+  
+  获取某个用户的文章列表。
+  
+  支持 query 参数：
+  
+  - `published`: optional boolean
+  - `limit`: optional integer, range 1..50
+  
+  行为要求：
+  
+  - 用户不存在返回 `404`
+  - 非法 query 参数返回 `400`
+  - `published=true` 只返回已发布文章
+  - `published=false` 只返回未发布文章
+  - 传入 `limit` 时，返回数量不能超过该值
+  
+  响应要求：
+  
+  - 成功返回 `200`
+  - 非法请求返回 `400`
+  - 用户不存在返回 `404`
+  
+  ## OpenAPI 要求
+  
+  `GET /api/docs` 返回的 OpenAPI 3.0 文档必须满足：
+  
+  - `openapi` 字段是 `3.0.x`
+  - `paths` 中不能出现 `/api/docs`
+  - 路径参数必须使用 `{id}`，不能使用 `:id`
+  - 必须只包含这 4 个业务方法
+  - 每个业务方法都要定义成功和错误响应
+  - 参数和 schema 约束必须与真实运行时行为一致
+  
+  ## 反硬编码要求
+  
+  不要只针对固定样例做硬编码。
+  
+  verifier 会使用随机用户名、随机邮箱，并交叉检查：
+  
+  - OpenAPI 文档约束
+  - 创建后的返回内容
+  - 更新后的读取结果
+  - posts 过滤与 limit 行为
+  
+  ## 交付标准
+  
+  - 保持服务为 HTTP JSON API
+  - 修复现有实现，不要改成假服务
+  - 只要行为正确、文档正确即可，具体实现方式不限
+
+author_email: "system@example.com"
+difficulty: hard
+tags:
+  - documentation
+  - openapi
+  - schema-validation
+  - existing-codebase
+max_agent_timeout_sec: 21600
+max_test_timeout_sec: 3600
