@@ -14,8 +14,8 @@ Import Tasks and Run Oracle - 本地/容器版
 
 环境变量:
   VE_TOS_AK, VE_TOS_SK (TOS 下载时需要)
-  TB_ORACLE_CMD: 调用 Terminal-Bench CLI 的前缀（默认 tb）。容器里若未安装 tb，请 pip install
-    terminal-bench，或设为 uv run tb（需已安装 uv 且项目能解析 tb）。
+  TB_ORACLE_CMD: 可选，覆盖默认的 tb 调用方式。默认用「当前 Python -m terminal_bench.cli.tb.main」，
+    与 pip 安装的 tb 入口一致，不依赖 PATH 里是否有 tb 可执行文件；仍需 pip install terminal-bench。
 
 用法:
   python oracle.py --record-id "recXXX" --zip-url "https://..." ...
@@ -57,25 +57,41 @@ def default_harbor2tbench_script() -> Path:
     return _repo_root() / "harbor2tbbench" / "harbor2tbench.py"
 
 
+def _default_tb_module_invoker() -> list[str]:
+    """
+    与 PyPI 包 [project.scripts] 一致：tb = terminal_bench.cli.tb.main:app
+    用当前解释器 -m 调用，避免容器里 PATH 未挂到 tb 可执行文件（FileNotFoundError: tb）。
+    """
+    return [sys.executable, "-m", "terminal_bench.cli.tb.main"]
+
+
 def tb_oracle_invoker() -> list[str]:
-    """tb 可执行前缀，如 ['tb'] 或 ['uv','run','tb']。"""
-    raw = os.environ.get("TB_ORACLE_CMD", "tb")
-    parts = shlex.split(raw, posix=os.name != "nt")
-    return parts if parts else ["tb"]
+    """Terminal-Bench CLI 前缀。未设置 TB_ORACLE_CMD 时用 _default_tb_module_invoker()。"""
+    raw = os.environ.get("TB_ORACLE_CMD")
+    if raw:
+        parts = shlex.split(raw, posix=os.name != "nt")
+        return parts if parts else _default_tb_module_invoker()
+    return _default_tb_module_invoker()
 
 
 def _validate_tb_invoker(invoker: list[str]) -> None:
-    """确保 invoker 第一个 token 在 PATH 中可执行（避免 subprocess FileNotFoundError: tb）。"""
+    """确保可启动 CLI；默认 -m 方式时校验 terminal-bench 已安装。"""
     if not invoker:
         raise ValueError("TB_ORACLE_CMD 解析为空")
     exe = invoker[0]
-    if shutil.which(exe) is None:
+    if not Path(exe).is_file() and shutil.which(exe) is None:
         raise FileNotFoundError(
-            f"找不到命令 {exe!r}（不在 PATH 中）。--runner tb 需要 Terminal-Bench CLI。\n"
-            "  • 安装: pip install terminal-bench（会提供 tb 命令）\n"
-            "  • 或使用 uv: export TB_ORACLE_CMD='uv run tb'\n"
-            f"  • 当前 TB_ORACLE_CMD={os.environ.get('TB_ORACLE_CMD', '(未设置，默认 tb)')!r}"
+            f"找不到解释器 {exe!r}。请确认 Python 可用，或设置 TB_ORACLE_CMD。"
         )
+    if len(invoker) >= 3 and invoker[1] == "-m" and str(invoker[2]).startswith(
+        "terminal_bench"
+    ):
+        try:
+            __import__("terminal_bench.cli.tb.main")
+        except ImportError as e:
+            raise FileNotFoundError(
+                "当前 Python 环境未安装 terminal-bench，请: pip install terminal-bench"
+            ) from e
 
 
 def upload_to_tos(
