@@ -14,7 +14,8 @@ Import Tasks and Run Oracle - 本地/容器版
 
 环境变量:
   VE_TOS_AK, VE_TOS_SK (TOS 下载时需要)
-  TB_ORACLE_CMD: 可选，覆盖 tb 调用方式，如 "tb" 或 "uv run tb"（默认 "tb"）
+  TB_ORACLE_CMD: 调用 Terminal-Bench CLI 的前缀（默认 tb）。容器里若未安装 tb，请 pip install
+    terminal-bench，或设为 uv run tb（需已安装 uv 且项目能解析 tb）。
 
 用法:
   python oracle.py --record-id "recXXX" --zip-url "https://..." ...
@@ -59,7 +60,22 @@ def default_harbor2tbench_script() -> Path:
 def tb_oracle_invoker() -> list[str]:
     """tb 可执行前缀，如 ['tb'] 或 ['uv','run','tb']。"""
     raw = os.environ.get("TB_ORACLE_CMD", "tb")
-    return shlex.split(raw, posix=os.name != "nt")
+    parts = shlex.split(raw, posix=os.name != "nt")
+    return parts if parts else ["tb"]
+
+
+def _validate_tb_invoker(invoker: list[str]) -> None:
+    """确保 invoker 第一个 token 在 PATH 中可执行（避免 subprocess FileNotFoundError: tb）。"""
+    if not invoker:
+        raise ValueError("TB_ORACLE_CMD 解析为空")
+    exe = invoker[0]
+    if shutil.which(exe) is None:
+        raise FileNotFoundError(
+            f"找不到命令 {exe!r}（不在 PATH 中）。--runner tb 需要 Terminal-Bench CLI。\n"
+            "  • 安装: pip install terminal-bench（会提供 tb 命令）\n"
+            "  • 或使用 uv: export TB_ORACLE_CMD='uv run tb'\n"
+            f"  • 当前 TB_ORACLE_CMD={os.environ.get('TB_ORACLE_CMD', '(未设置，默认 tb)')!r}"
+        )
 
 
 def upload_to_tos(
@@ -313,6 +329,7 @@ def run_tb_oracle(
     dataset_path = str(Path(tasks_dir).resolve())
     output_path = str(Path(run_dir).resolve())
     invoker = tb_oracle_invoker()
+    _validate_tb_invoker(invoker)
 
     all_ok = True
     for task_id in tb_task_ids:
