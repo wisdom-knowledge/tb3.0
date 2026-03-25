@@ -166,7 +166,11 @@ def _is_tb1_task_dir(task_dir: Path) -> bool:
         return False
     if not ((task_dir / "solution.sh").is_file() or (task_dir / "solution.yaml").is_file()):
         return False
-    if not (task_dir / "tests" / "test_outputs.py").is_file():
+    
+    has_test_outputs = (task_dir / "tests" / "test_outputs.py").is_file()
+    has_verifier = (task_dir / "tests" / "verifier.py").is_file()
+
+    if not (has_test_outputs or has_verifier):
         return False
     return True
 
