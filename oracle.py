@@ -199,7 +199,7 @@ def extract_and_import_tasks(zip_path: str, tasks_dir: str) -> list[str]:
         task_dirs = list(_iter_candidate_task_dirs(extract_path))
         if not task_dirs:
             raise RuntimeError(
-                "zip 文件中未找到符合 TB1 格式的任务目录；需要至少包含 task.yaml、Dockerfile、solution.sh/solution.yaml、tests/test_outputs.py"
+                "zip 文件中未找到符合 TB1 格式的任务目录；需要至少包含 task.yaml、Dockerfile、solution.sh/solution.yaml、run-tests.sh"
             )
 
         log.info("找到 %d 个 TB1 任务目录", len(task_dirs))
