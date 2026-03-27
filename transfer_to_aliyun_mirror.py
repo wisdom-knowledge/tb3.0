@@ -10,6 +10,7 @@ transfer_to_aliyun_mirror.py — 解压 ZIP，在 Daytona 沙箱内用 Claude Co
     python3 transfer_to_aliyun_mirror.py --input-zip task.zip --output-zip task_aliyun.zip
     python3 transfer_to_aliyun_mirror.py -i task.zip -o out.zip --change-log
     python3 transfer_to_aliyun_mirror.py -i task.zip -o out.zip --dry-run
+    python3 transfer_to_aliyun_mirror.py -i a.zip -o b.zip --snapshot-name 你在Daytona里的快照名
 
 环境变量（与 run_daytona 对齐）:
     DAYTONA_API_KEY, SNAPSHOT_NAME, SANDBOX_NAME, SANDBOX_NAME_PREFIX
@@ -50,7 +51,7 @@ from daytona import (
 # 配置（环境变量覆盖）
 # ============================================================
 DAYTONA_API_KEY = os.environ.get("DAYTONA_API_KEY", "")
-SNAPSHOT_NAME = os.environ.get("SNAPSHOT_NAME", "claude-code-snapshot")
+SNAPSHOT_NAME = os.environ.get("SNAPSHOT_NAME", "snapshotclaude-code-")
 SANDBOX_NAME_PREFIX = os.environ.get("SANDBOX_NAME_PREFIX", "aliyun_mirror")
 
 OPENROUTER_BASE_URL = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api")
@@ -251,6 +252,12 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument("--input-zip", "-i", required=True, type=Path, help="输入 ZIP 路径")
     p.add_argument("--output-zip", "-o", required=True, type=Path, help="输出 ZIP 路径")
+    p.add_argument(
+        "--snapshot-name",
+        metavar="NAME",
+        default=None,
+        help="Daytona 快照名，覆盖环境变量 SNAPSHOT_NAME（默认仍为 claude-code-snapshot）",
+    )
     p.add_argument("--prompt-file", type=Path, help="自定义系统 prompt 文件（默认内置）")
     log_g = p.add_mutually_exclusive_group()
     log_g.add_argument(
@@ -467,6 +474,8 @@ def main() -> int:
             print("Error: 未设置 OPENROUTER_API_KEY", file=sys.stderr)
             return 2
 
+        snapshot_name = (args.snapshot_name or "").strip() or SNAPSHOT_NAME
+
         daytona = Daytona(DaytonaConfig(api_key=DAYTONA_API_KEY))
         sandbox_name = os.environ.get("SANDBOX_NAME") or f"{SANDBOX_NAME_PREFIX}-{uuid.uuid4().hex[:6]}"
         print(f"沙箱名称: {sandbox_name}")
@@ -485,12 +494,12 @@ def main() -> int:
         session_id = "mirror-session"
 
         try:
-            print(f"创建沙箱 snapshot={SNAPSHOT_NAME} ...")
+            print(f"创建沙箱 snapshot={snapshot_name} ...")
             try:
                 sandbox = daytona.create(
                     CreateSandboxFromSnapshotParams(
                         name=sandbox_name,
-                        snapshot=SNAPSHOT_NAME,
+                        snapshot=snapshot_name,
                         network_block_all=False,
                         auto_stop_interval=0,
                         auto_delete_interval=0,
@@ -518,7 +527,7 @@ def main() -> int:
                     sandbox = daytona.create(
                         CreateSandboxFromSnapshotParams(
                             name=sandbox_name,
-                            snapshot=SNAPSHOT_NAME,
+                            snapshot=snapshot_name,
                             network_block_all=False,
                             auto_stop_interval=0,
                             auto_delete_interval=0,
