@@ -76,7 +76,7 @@ INDEX_OPTION_PATTERNS = (
 )
 
 ENV_ASSIGNMENT_PATTERN = re.compile(
-    r"(?P<prefix>\b(?:export\s+)?(?:PIP_INDEX_URL|UV_INDEX_URL)\b\s*[:=]\s*)"
+    r"(?P<prefix>\b(?:export\s+)?(?:PIP_INDEX_URL|UV_INDEX_URL|UV_DEFAULT_INDEX)\b\s*[:=]\s*)"
     r"(?P<quote>['\"]?)(?P<url>https?://[^\s'\",]+)(?P=quote)"
 )
 
@@ -92,6 +92,12 @@ TOML_URL_PATTERN = re.compile(
 SECTION_PATTERN = re.compile(r"^\s*\[(?P<section>[^\]]+)\]\s*$")
 DOUBLE_SECTION_PATTERN = re.compile(r"^\s*\[\[(?P<section>[^\]]+)\]\]\s*$")
 APT_COMMAND_PATTERN = re.compile(r"\b(?:apt-get|apt)\s+(?:update|install)\b")
+UV_COMMAND_PATTERN = re.compile(
+    r"^(?P<indent>\s*)"
+    r"(?P<env>(?:[A-Za-z_][A-Za-z0-9_]*=(?:[^\s\"']+|\"[^\"]*\"|'[^']*')\s+)*)"
+    r"(?P<sudo>sudo\s+)?"
+    r"(?P<cmd>uvx|uv)\b"
+)
 
 
 @dataclass
@@ -220,6 +226,26 @@ def maybe_rewrite_dockerfile_apt_line(
 
     prefix = build_apt_rewrite_prefix(distro)
     updated = f"{line[:match.start()]}{prefix}{line[match.start():]}"
+    return updated, 1
+
+
+def maybe_prefix_uv_command(line: str, mirror_url: str) -> tuple[str, int]:
+    stripped = line.lstrip()
+    if not stripped or stripped.startswith(("#", "//", ";")):
+        return line, 0
+    if "UV_INDEX_URL" in line or "UV_DEFAULT_INDEX" in line:
+        return line, 0
+    if "--index-url" in line or "--index " in line or "--default-index" in line:
+        return line, 0
+
+    match = UV_COMMAND_PATTERN.match(line)
+    if not match:
+        return line, 0
+
+    updated = (
+        f"{match.group('indent')}{match.group('env')}{match.group('sudo') or ''}"
+        f"UV_DEFAULT_INDEX={mirror_url} {match.group('cmd')}{line[match.end('cmd'):]}"
+    )
     return updated, 1
 
 
@@ -401,6 +427,9 @@ def process_file(path: Path, mirror_url: str, dry_run: bool) -> FileResult:
                 original,
             )
             result.replacements += changed
+
+        updated_line, changed = maybe_prefix_uv_command(updated_line, mirror_url)
+        result.replacements += changed
 
         for pattern in INDEX_OPTION_PATTERNS:
             updated_line, changed = replace_pattern(updated_line, pattern, mirror_url, result)
