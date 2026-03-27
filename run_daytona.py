@@ -80,6 +80,7 @@ CLAUDE_MODEL = os.environ.get(
     os.environ.get("ANTHROPIC_DEFAULT_SONNET_MODEL", "openai/gpt-5.4"),
 )
 
+
 GIT_REPO_URL = os.environ.get(
     "GIT_REPO_URL",
     "https://github.com/wisdom-knowledge/tb3.0",
