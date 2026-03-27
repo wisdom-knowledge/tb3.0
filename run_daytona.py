@@ -77,7 +77,7 @@ OPENROUTER_BASE_URL = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 CLAUDE_MODEL = os.environ.get(
     "ANTHROPIC_MODEL",
-    os.environ.get("ANTHROPIC_DEFAULT_SONNET_MODEL", "anthropic/claude-sonnet-4.6"),
+    os.environ.get("ANTHROPIC_DEFAULT_SONNET_MODEL", "openai/gpt-5.4"),
 )
 
 GIT_REPO_URL = os.environ.get(
