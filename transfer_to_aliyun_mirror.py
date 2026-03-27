@@ -643,12 +643,18 @@ def main() -> int:
                 claude_rc = int(rc_match.group(1)) if rc_match else None
 
                 if claude_rc not in (0, None):
+                    try:
+                        err_text = sandbox.fs.download_file(err_remote).decode("utf-8", errors="replace")
+                        print(f"    Claude stderr:\n{err_text[:4000]}")
+                    except Exception as e:
+                        print(f"    警告: 读取 Claude stderr 失败: {e}")
                     print(f"    警告: claude 退出码 {claude_rc}，保留原文件")
                     failed += 1
                     if log_path:
                         log_blocks.append(
                             f"\n## 文件: {rel_label}\n### 状态: 失败（未写回）\n"
                             f"原因: Claude CLI 退出码 {claude_rc}\n"
+                            + (f"### stderr\n{err_text}\n" if 'err_text' in locals() else "")
                         )
                     continue
 
