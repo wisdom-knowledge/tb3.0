@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import logging
 import os
 import re
 import shlex
@@ -51,6 +52,8 @@ from daytona import (
     SessionExecuteRequest,
 )
 
+logger = logging.getLogger(__name__)
+
 # ============================================================
 # 配置（环境变量覆盖）
 # ============================================================
@@ -62,7 +65,7 @@ OPENROUTER_BASE_URL = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 CLAUDE_MODEL = os.environ.get(
     "ANTHROPIC_MODEL",
-    os.environ.get("ANTHROPIC_DEFAULT_SONNET_MODEL", "openai/gpt-5.4"),
+    os.environ.get("ANTHROPIC_DEFAULT_SONNET_MODEL", "anthropic/claude-sonnet-4.6"),
 )
 
 
@@ -424,6 +427,11 @@ def _full_body_appendix(before: str, after: str) -> str:
 
 
 def main() -> int:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
     args = _parse_args()
     input_zip = args.input_zip.resolve()
     output_zip = args.output_zip.resolve()
@@ -628,14 +636,14 @@ def main() -> int:
                     if MIRROR_CLAUDE_PERMISSION_MODE
                     else ""
                 )
-                # 避免 cat|管道 导致退出码/重定向异常；用 bash + 标准输入重定向
-                inner_sh = (
-                    f"set -o pipefail; cd {REMOTE_WORK} && "
-                    f"claude -p{perm_arg} --system-prompt-file {prompt_remote} "
-                    f"< {in_remote} > {out_remote} 2>{err_remote}; "
-                    f'echo "CLAUDE_EXIT_CODE=$?"'
+                claude_cmd = (
+                    f"cd {REMOTE_WORK} && "
+                    f"cat {in_remote} | claude -p{perm_arg} "
+                    f"--system-prompt-file {prompt_remote} "
+                    f"> {out_remote} 2>{err_remote}; "
+                    f"CLAUDE_RC=$?; "
+                    f'echo "CLAUDE_EXIT_CODE=$CLAUDE_RC"'
                 )
-                claude_cmd = "bash -lc " + shlex.quote(inner_sh)
 
                 print(f"  Claude 处理: {rel_label} ({len(text)} 字符)")
                 exec_resp = sandbox.process.execute_session_command(
@@ -648,7 +656,7 @@ def main() -> int:
                 )
 
                 if exit_code == -1:
-                    print("    警告: 超时，保留原文件")
+                    logger.warning("[%s] 超时，保留原文件", rel_label)
                     failed += 1
                     if log_path:
                         log_blocks.append(
@@ -665,17 +673,17 @@ def main() -> int:
                     out_snip = _sandbox_fetch_remote_text(sandbox, out_remote, 8000)
                     se = (sess_err or "").strip()
                     ol = (out_log or "").strip()
-                    print(f"    警告: claude 退出码 {claude_rc}，保留原文件")
+                    logger.warning("[%s] claude 退出码 %s，保留原文件", rel_label, claude_rc)
                     if se:
-                        print(f"    会话 stderr（节选）:\n{se[:4000]}")
+                        logger.warning("[%s] 会话 stderr（节选）:\n%s", rel_label, se[:4000])
                     if err_snip.strip():
-                        print(f"    stderr.log（节选）:\n{err_snip[:4000]}")
+                        logger.warning("[%s] stderr.log（节选）:\n%s", rel_label, err_snip[:4000])
                     elif not se:
-                        print("    （会话 stderr 与 stderr.log 均为空或不可读）")
+                        logger.debug("[%s] 会话 stderr 与 stderr.log 均为空或不可读", rel_label)
                     if ol:
-                        print(f"    会话 stdout（节选）:\n{ol[:3500]}")
+                        logger.debug("[%s] 会话 stdout（节选）:\n%s", rel_label, ol[:3500])
                     if out_snip.strip():
-                        print(f"    stdout.txt（节选）:\n{out_snip[:2500]}")
+                        logger.debug("[%s] stdout.txt（节选）:\n%s", rel_label, out_snip[:2500])
                     diag = f"{se}\n{ol}\n{out_snip}\n{err_snip}"
                     hint = ""
                     if "Author anthropic is banned" in diag or "anthropic is banned" in diag.lower():
@@ -685,9 +693,10 @@ def main() -> int:
                             "与脚本或 ZIP 无关。请在供应商控制台更换策略/模型 ID，或改用 Anthropic 官方 API；"
                             "「Please run /login」在无人值守沙箱中通常无法解决此 403。\n"
                         )
-                        print(
-                            "    提示: 403「Author anthropic is banned」— 当前 API 线路禁止 Anthropic 模型，"
-                            "请换模型/换 Key 或直连 Anthropic；非本脚本缺陷。"
+                        logger.warning(
+                            "[%s] 403「Author anthropic is banned」— 当前 API 线路禁止 Anthropic 模型，"
+                            "请换模型/换 Key 或直连 Anthropic；非本脚本缺陷。",
+                            rel_label,
                         )
                     failed += 1
                     if log_path:
@@ -706,7 +715,7 @@ def main() -> int:
                     out_bytes = sandbox.fs.download_file(out_remote)
                     out_text = out_bytes.decode("utf-8")
                 except Exception as e:
-                    print(f"    警告: 下载输出失败 {e}，保留原文件")
+                    logger.warning("[%s] 下载输出失败 %s，保留原文件", rel_label, e)
                     failed += 1
                     if log_path:
                         log_blocks.append(
@@ -716,7 +725,7 @@ def main() -> int:
 
                 out_text = _strip_optional_markdown_fence(out_text)
                 if not out_text.strip() and text.strip():
-                    print("    警告: 模型返回空，保留原文件")
+                    logger.warning("[%s] 模型返回空，保留原文件", rel_label)
                     failed += 1
                     if log_path:
                         log_blocks.append(
