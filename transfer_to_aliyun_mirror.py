@@ -11,6 +11,8 @@ transfer_to_aliyun_mirror.py — 解压 ZIP，在 Daytona 沙箱内用 Claude Co
     python3 transfer_to_aliyun_mirror.py -i task.zip -o out.zip --change-log
     python3 transfer_to_aliyun_mirror.py -i task.zip -o out.zip --dry-run
     python3 transfer_to_aliyun_mirror.py -i a.zip -o b.zip --snapshot-name 你在Daytona里的快照名
+    # 输入与输出可为同一 ZIP 路径（先打临时包再原子替换，文件名保持一致）
+    python3 transfer_to_aliyun_mirror.py -i task.zip -o task.zip --change-log
 
 环境变量（与 run_daytona 对齐）:
     DAYTONA_API_KEY, SNAPSHOT_NAME, SANDBOX_NAME, SANDBOX_NAME_PREFIX
@@ -19,6 +21,7 @@ transfer_to_aliyun_mirror.py — 解压 ZIP，在 Daytona 沙箱内用 Claude Co
     CLAUDE_TIMEOUT, MIRROR_MAX_FILE_BYTES
     MIRROR_CHANGE_LOG_MAX_DIFF_LINES — 单文件 unified diff 最多行数（默认 800）
     MIRROR_CHANGE_LOG_FULL_BODY_BYTES — 单文件「替换前/后全文」附在日志中的上限（总字节，默认 65536）；超出则仅 diff
+    MIRROR_CLAUDE_PERMISSION_MODE — 传给 claude -p 的 --permission-mode（默认 acceptEdits）；设为空则不加
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ import argparse
 import difflib
 import os
 import re
+import shlex
 import shutil
 import sys
 import tempfile
@@ -67,6 +71,7 @@ CLAUDE_TIMEOUT = int(os.environ.get("CLAUDE_TIMEOUT", "600"))
 MIRROR_MAX_FILE_BYTES = int(os.environ.get("MIRROR_MAX_FILE_BYTES", "524288"))
 MIRROR_CHANGE_LOG_MAX_DIFF_LINES = int(os.environ.get("MIRROR_CHANGE_LOG_MAX_DIFF_LINES", "800"))
 MIRROR_CHANGE_LOG_FULL_BODY_BYTES = int(os.environ.get("MIRROR_CHANGE_LOG_FULL_BODY_BYTES", "65536"))
+MIRROR_CLAUDE_PERMISSION_MODE = os.environ.get("MIRROR_CLAUDE_PERMISSION_MODE", "acceptEdits").strip()
 
 # 相对「任务根目录」的固定清单（不递归）
 _ROOT_FILE_NAMES = (
@@ -342,6 +347,16 @@ def _wait_claude_command(
     return exit_code, stdout, stderr
 
 
+def _sandbox_fetch_remote_text(sandbox, remote_path: str, max_chars: int) -> str:
+    try:
+        raw = sandbox.fs.download_file(remote_path).decode("utf-8", errors="replace")
+    except Exception as e:
+        return f"（读取 {remote_path} 失败: {e}）"
+    if len(raw) > max_chars:
+        return raw[:max_chars] + f"\n...（共 {len(raw)} 字符，已截断）"
+    return raw
+
+
 def _write_text_exact(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="") as f:
@@ -408,9 +423,9 @@ def main() -> int:
         print(f"Error: 输入 ZIP 不存在: {input_zip}", file=sys.stderr)
         return 2
 
-    if not args.dry_run and output_zip.resolve() == input_zip.resolve():
-        print("Error: 输出 ZIP 不能与输入 ZIP 为同一路径", file=sys.stderr)
-        return 2
+    same_inout = not args.dry_run and output_zip.resolve() == input_zip.resolve()
+    if same_inout:
+        print("注意: 输入与输出为同一路径，将先写入临时 ZIP 再替换（文件名不变）")
 
     log_path: Path | None = None
     if not args.dry_run:
@@ -611,13 +626,19 @@ def main() -> int:
 
                 sandbox.fs.upload_file(text.encode("utf-8"), in_remote)
 
-                claude_cmd = (
-                    f"cd {REMOTE_WORK} && "
-                    f"cat {in_remote} | claude -p "
-                    f"--system-prompt-file {prompt_remote} "
-                    f"> {out_remote} 2>{err_remote}; "
+                perm_arg = (
+                    f" --permission-mode {MIRROR_CLAUDE_PERMISSION_MODE}"
+                    if MIRROR_CLAUDE_PERMISSION_MODE
+                    else ""
+                )
+                # 避免 cat|管道 导致退出码/重定向异常；用 bash + 标准输入重定向
+                inner_sh = (
+                    f"set -o pipefail; cd {REMOTE_WORK} && "
+                    f"claude -p{perm_arg} --system-prompt-file {prompt_remote} "
+                    f"< {in_remote} > {out_remote} 2>{err_remote}; "
                     f'echo "CLAUDE_EXIT_CODE=$?"'
                 )
+                claude_cmd = "bash -lc " + shlex.quote(inner_sh)
 
                 print(f"  Claude 处理: {rel_label} ({len(text)} 字符)")
                 exec_resp = sandbox.process.execute_session_command(
@@ -625,7 +646,7 @@ def main() -> int:
                     SessionExecuteRequest(command=claude_cmd, run_async=True),
                 )
                 cmd_id = exec_resp.cmd_id
-                exit_code, out_log, _err_log = _wait_claude_command(
+                exit_code, out_log, sess_err = _wait_claude_command(
                     sandbox, session_id, cmd_id, CLAUDE_TIMEOUT, rel_label
                 )
 
@@ -643,18 +664,30 @@ def main() -> int:
                 claude_rc = int(rc_match.group(1)) if rc_match else None
 
                 if claude_rc not in (0, None):
-                    try:
-                        err_text = sandbox.fs.download_file(err_remote).decode("utf-8", errors="replace")
-                        print(f"    Claude stderr:\n{err_text[:4000]}")
-                    except Exception as e:
-                        print(f"    警告: 读取 Claude stderr 失败: {e}")
+                    err_snip = _sandbox_fetch_remote_text(sandbox, err_remote, 12000)
+                    out_snip = _sandbox_fetch_remote_text(sandbox, out_remote, 8000)
+                    se = (sess_err or "").strip()
+                    ol = (out_log or "").strip()
                     print(f"    警告: claude 退出码 {claude_rc}，保留原文件")
+                    if se:
+                        print(f"    会话 stderr（节选）:\n{se[:4000]}")
+                    if err_snip.strip():
+                        print(f"    stderr.log（节选）:\n{err_snip[:4000]}")
+                    elif not se:
+                        print("    （会话 stderr 与 stderr.log 均为空或不可读）")
+                    if ol:
+                        print(f"    会话 stdout（节选）:\n{ol[:3500]}")
+                    if out_snip.strip():
+                        print(f"    stdout.txt（节选）:\n{out_snip[:2500]}")
                     failed += 1
                     if log_path:
                         log_blocks.append(
                             f"\n## 文件: {rel_label}\n### 状态: 失败（未写回）\n"
                             f"原因: Claude CLI 退出码 {claude_rc}\n"
-                            + (f"### stderr\n{err_text}\n" if 'err_text' in locals() else "")
+                            f"### 会话 stderr\n{se or '（空）'}\n"
+                            f"### 会话 stdout\n{ol or '（空）'}\n"
+                            f"### stderr.log\n{err_snip}\n"
+                            f"### stdout.txt\n{out_snip}\n"
                         )
                     continue
 
@@ -700,10 +733,20 @@ def main() -> int:
             except Exception:
                 pass
 
+            zip_target = (
+                output_zip.parent / f".{output_zip.name}.mirror-tmp.{uuid.uuid4().hex}.zip"
+                if same_inout
+                else output_zip
+            )
             try:
-                _zip_tree(staging, output_zip)
+                _zip_tree(staging, zip_target)
             except OSError as e:
                 print(f"Error: 打包失败: {e}", file=sys.stderr)
+                if same_inout and zip_target.exists():
+                    try:
+                        zip_target.unlink()
+                    except OSError:
+                        pass
                 if log_path and log_blocks:
                     try:
                         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -712,6 +755,17 @@ def main() -> int:
                     except OSError:
                         pass
                 return 3
+
+            if same_inout:
+                try:
+                    os.replace(zip_target, output_zip)
+                except OSError as e:
+                    print(f"Error: 无法将临时 ZIP 替换为输出路径: {e}", file=sys.stderr)
+                    try:
+                        zip_target.unlink()
+                    except OSError:
+                        pass
+                    return 3
 
             if log_path and log_blocks:
                 log_path.parent.mkdir(parents=True, exist_ok=True)
