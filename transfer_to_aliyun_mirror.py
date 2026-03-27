@@ -65,6 +65,7 @@ CLAUDE_MODEL = os.environ.get(
     os.environ.get("ANTHROPIC_DEFAULT_SONNET_MODEL", "openai/gpt-5.4"),
 )
 
+
 REMOTE_WORK = "/tmp/aliyun_mirror_transfer"
 POLL_INTERVAL = 5
 CLAUDE_TIMEOUT = int(os.environ.get("CLAUDE_TIMEOUT", "600"))
