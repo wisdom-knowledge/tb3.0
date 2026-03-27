@@ -51,7 +51,7 @@ from daytona import (
 # 配置（环境变量覆盖）
 # ============================================================
 DAYTONA_API_KEY = os.environ.get("DAYTONA_API_KEY", "")
-SNAPSHOT_NAME = os.environ.get("SNAPSHOT_NAME", "snapshotclaude-code-")
+SNAPSHOT_NAME = os.environ.get("SNAPSHOT_NAME", "claude-code-snapshot")
 SANDBOX_NAME_PREFIX = os.environ.get("SANDBOX_NAME_PREFIX", "aliyun_mirror")
 
 OPENROUTER_BASE_URL = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api")
