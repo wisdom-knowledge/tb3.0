@@ -146,16 +146,10 @@ DEFAULT_SYSTEM_PROMPT = """【角色与任务】
 不要输出任何额外说明、前言、后记或解释文字。"""
 
 def _strip_optional_markdown_fence(text: str) -> str:
-    s = text.strip()
-    if not s.startswith("```"):
+    m = re.fullmatch(r"```[^\n]*\n([\s\S]*?)\n?```\s*", text)
+    if not m:
         return text
-    lines = s.split("\n")
-    if lines and lines[0].startswith("```"):
-        lines = lines[1:]
-    if lines and lines[-1].strip() == "```":
-        lines = lines[:-1]
-    return "\n".join(lines)
-
+    return m.group(1)
 
 def _is_probably_binary(sample: bytes) -> bool:
     if b"\x00" in sample[:8192]:
@@ -249,6 +243,20 @@ def _allowed_files(task_root: Path) -> list[Path]:
                     out.append(p)
 
     return out
+
+
+def _build_sandbox_env() -> dict[str, str]:
+    return {
+        "OPENROUTER_API_KEY": OPENROUTER_API_KEY,
+        "ANTHROPIC_BASE_URL": OPENROUTER_BASE_URL,
+        "ANTHROPIC_AUTH_TOKEN": OPENROUTER_API_KEY,
+        "ANTHROPIC_API_KEY": "",
+        "ANTHROPIC_MODEL": CLAUDE_MODEL,
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": CLAUDE_MODEL,
+        "API_TIMEOUT_MS": "300000",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        "CI": "1",
+    }
 
 
 def _parse_args() -> argparse.Namespace:
@@ -456,6 +464,12 @@ def main() -> int:
 
         task_root = _resolve_task_root(extracted)
         candidates = _allowed_files(task_root)
+        if not candidates:
+            print(
+                "Error: ZIP 中未找到可处理的白名单文件（根目录固定文件或 tests/*.sh）",
+                file=sys.stderr,
+            )
+            return 2
 
         if args.dry_run:
             print(f"任务根目录（解析为）: {task_root}")
@@ -519,16 +533,7 @@ def main() -> int:
                         auto_stop_interval=0,
                         auto_delete_interval=0,
                         resources=Resources(cpu=2, memory=4, disk=5),
-                        env_vars={
-                            "ANTHROPIC_BASE_URL": OPENROUTER_BASE_URL,
-                            "ANTHROPIC_AUTH_TOKEN": OPENROUTER_API_KEY,
-                            "ANTHROPIC_API_KEY": "",
-                            "ANTHROPIC_MODEL": CLAUDE_MODEL,
-                            "ANTHROPIC_DEFAULT_SONNET_MODEL": CLAUDE_MODEL,
-                            "API_TIMEOUT_MS": "300000",
-                            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-                            "CI": "1",
-                        },
+                        env_vars=_build_sandbox_env(),
                     ),
                     timeout=0,
                 )
@@ -547,17 +552,7 @@ def main() -> int:
                             auto_stop_interval=0,
                             auto_delete_interval=0,
                             resources=Resources(cpu=2, memory=4, disk=5),
-                            env_vars={
-                                "OPENROUTER_API_KEY": OPENROUTER_API_KEY,
-                                "ANTHROPIC_BASE_URL": OPENROUTER_BASE_URL,
-                                "ANTHROPIC_AUTH_TOKEN": OPENROUTER_API_KEY,
-                                "ANTHROPIC_API_KEY": "",
-                                "ANTHROPIC_MODEL": CLAUDE_MODEL,
-                                "ANTHROPIC_DEFAULT_SONNET_MODEL": CLAUDE_MODEL,
-                                "API_TIMEOUT_MS": "300000",
-                                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-                                "CI": "1",
-                            },
+                            env_vars=_build_sandbox_env(),
                         ),
                         timeout=0,
                     )
@@ -620,9 +615,10 @@ def main() -> int:
                         )
                     continue
 
-                in_remote = f"{REMOTE_WORK}/stdin.txt"
-                out_remote = f"{REMOTE_WORK}/stdout.txt"
-                err_remote = f"{REMOTE_WORK}/stderr.log"
+                remote_token = f"{uuid.uuid4().hex}_{Path(rel_label).name}"
+                in_remote = f"{REMOTE_WORK}/{remote_token}.stdin.txt"
+                out_remote = f"{REMOTE_WORK}/{remote_token}.stdout.txt"
+                err_remote = f"{REMOTE_WORK}/{remote_token}.stderr.log"
 
                 sandbox.fs.upload_file(text.encode("utf-8"), in_remote)
 
@@ -800,11 +796,11 @@ def main() -> int:
                         print("沙箱已停止。")
                 except Exception as e:
                     print(f"警告: 停止沙箱失败: {e}")
-                    try:
-                        daytona.delete(sandbox)
-                        print("已强制删除沙箱。")
-                    except Exception:
-                        pass
+                try:
+                    daytona.delete(sandbox)
+                    print("沙箱已删除。")
+                except Exception as e:
+                    print(f"警告: 删除沙箱失败: {e}")
 
 
 if __name__ == "__main__":
