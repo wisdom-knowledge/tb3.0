@@ -65,7 +65,7 @@ OPENROUTER_BASE_URL = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 CLAUDE_MODEL = os.environ.get(
     "ANTHROPIC_MODEL",
-    os.environ.get("ANTHROPIC_DEFAULT_SONNET_MODEL", "openai/gpt-5.4"),
+    os.environ.get("ANTHROPIC_DEFAULT_SONNET_MODEL", "anthropic/claude-sonnet-4.6"),
 )
 
 
@@ -347,9 +347,9 @@ def _wait_claude_command(
             pass
         hb += POLL_INTERVAL
         if hb > 0 and hb % 60 == 0:
-            print(f"    ... [{label}] 已运行 {time.time() - start:.0f}s")
+            logger.info("[%s] 已运行 %.0fs", label, time.time() - start)
     else:
-        print(f"    警告: [{label}] 超时 {timeout_sec}s")
+        logger.warning("[%s] 超时 %ss", label, timeout_sec)
         try:
             sandbox.process.delete_session(session_id)
         except Exception:
@@ -437,12 +437,12 @@ def main() -> int:
     output_zip = args.output_zip.resolve()
 
     if not input_zip.is_file():
-        print(f"Error: 输入 ZIP 不存在: {input_zip}", file=sys.stderr)
+        logger.error("输入 ZIP 不存在: %s", input_zip)
         return 2
 
     same_inout = not args.dry_run and output_zip.resolve() == input_zip.resolve()
     if same_inout:
-        print("注意: 输入与输出为同一路径，将先写入临时 ZIP 再替换（文件名不变）")
+        logger.info("输入与输出为同一路径，将先写入临时 ZIP 再替换（文件名不变）")
 
     log_path: Path | None = None
     if not args.dry_run:
@@ -454,7 +454,7 @@ def main() -> int:
 
     if args.prompt_file:
         if not args.prompt_file.is_file():
-            print(f"Error: prompt 文件不存在: {args.prompt_file}", file=sys.stderr)
+            logger.error("prompt 文件不存在: %s", args.prompt_file)
             return 2
         system_prompt = args.prompt_file.read_text(encoding="utf-8")
     else:
@@ -468,24 +468,23 @@ def main() -> int:
         try:
             _safe_extract_zip(input_zip, extracted)
         except (ValueError, zipfile.BadZipFile, OSError) as e:
-            print(f"Error: 解压失败: {e}", file=sys.stderr)
+            logger.error("解压失败: %s", e)
             return 2
 
         task_root = _resolve_task_root(extracted)
         candidates = _allowed_files(task_root)
         if not candidates:
-            print(
-                "Error: ZIP 中未找到可处理的白名单文件（根目录固定文件或 tests/*.sh）",
-                file=sys.stderr,
+            logger.error(
+                "ZIP 中未找到可处理的白名单文件（根目录固定文件或 tests/*.sh）",
             )
             return 2
 
         if args.dry_run:
-            print(f"任务根目录（解析为）: {task_root}")
-            print("Dry-run：将送交 Claude 的文件（相对任务根）:")
+            logger.info("任务根目录（解析为）: %s", task_root)
+            logger.info("Dry-run：将送交 Claude 的文件（相对任务根）:")
             for p in candidates:
-                print(f"  {p.relative_to(task_root).as_posix()}")
-            print(f"共 {len(candidates)} 个文件")
+                logger.info("  %s", p.relative_to(task_root).as_posix())
+            logger.info("共 %s 个文件", len(candidates))
             return 0
 
         shutil.copytree(extracted, staging, symlinks=True)
@@ -506,33 +505,33 @@ def main() -> int:
             staging_candidates.append(staging / rel_to_extract)
 
         if not DAYTONA_API_KEY:
-            print("Error: 未设置 DAYTONA_API_KEY", file=sys.stderr)
+            logger.error("未设置 DAYTONA_API_KEY")
             return 2
         if not OPENROUTER_API_KEY:
-            print("Error: 未设置 OPENROUTER_API_KEY", file=sys.stderr)
+            logger.error("未设置 OPENROUTER_API_KEY")
             return 2
 
         snapshot_name = (args.snapshot_name or "").strip() or SNAPSHOT_NAME
 
         daytona = Daytona(DaytonaConfig(api_key=DAYTONA_API_KEY))
         sandbox_name = os.environ.get("SANDBOX_NAME") or f"{SANDBOX_NAME_PREFIX}-{uuid.uuid4().hex[:6]}"
-        print(f"沙箱名称: {sandbox_name}")
+        logger.info("沙箱名称: %s", sandbox_name)
 
         try:
             existing = daytona.get(sandbox_name)
-            print(f"删除已存在沙箱: {existing.id}")
+            logger.info("删除已存在沙箱: %s", existing.id)
             daytona.delete(existing)
             time.sleep(2)
         except DaytonaNotFoundError:
             pass
         except Exception as e:
-            print(f"清理已有沙箱时跳过: {e}")
+            logger.warning("清理已有沙箱时跳过: %s", e)
 
         sandbox = None
         session_id = "mirror-session"
 
         try:
-            print(f"创建沙箱 snapshot={snapshot_name} ...")
+            logger.info("创建沙箱 snapshot=%s ...", snapshot_name)
             try:
                 sandbox = daytona.create(
                     CreateSandboxFromSnapshotParams(
@@ -569,12 +568,12 @@ def main() -> int:
                     raise
 
             assert sandbox is not None
-            print(f"沙箱已创建: {sandbox.id}")
+            logger.info("沙箱已创建: %s", sandbox.id)
 
             sandbox.process.exec(f"mkdir -p {REMOTE_WORK}")
             prompt_remote = f"{REMOTE_WORK}/system_prompt.md"
             sandbox.fs.upload_file(system_prompt.encode("utf-8"), prompt_remote)
-            print(f"已上传系统 prompt -> {prompt_remote}")
+            logger.info("已上传系统 prompt -> %s", prompt_remote)
 
             _ensure_session(sandbox, session_id)
 
@@ -586,7 +585,7 @@ def main() -> int:
                 try:
                     raw = dst.read_bytes()
                 except OSError as e:
-                    print(f"  读失败 {rel_label}: {e}")
+                    logger.warning("读失败 %s: %s", rel_label, e)
                     failed += 1
                     if log_path:
                         log_blocks.append(
@@ -595,7 +594,7 @@ def main() -> int:
                     continue
 
                 if _is_probably_binary(raw[: min(len(raw), 8192)]):
-                    print(f"  跳过（疑似二进制）: {rel_label}")
+                    logger.warning("跳过（疑似二进制）: %s", rel_label)
                     failed += 1
                     if log_path:
                         log_blocks.append(
@@ -604,7 +603,7 @@ def main() -> int:
                     continue
 
                 if len(raw) > MIRROR_MAX_FILE_BYTES:
-                    print(f"  跳过（超过 MIRROR_MAX_FILE_BYTES）: {rel_label}")
+                    logger.warning("跳过（超过 MIRROR_MAX_FILE_BYTES）: %s", rel_label)
                     failed += 1
                     if log_path:
                         log_blocks.append(
@@ -616,7 +615,7 @@ def main() -> int:
                 try:
                     text = raw.decode("utf-8")
                 except UnicodeDecodeError:
-                    print(f"  跳过（非 UTF-8）: {rel_label}")
+                    logger.warning("跳过（非 UTF-8）: %s", rel_label)
                     failed += 1
                     if log_path:
                         log_blocks.append(
@@ -645,7 +644,7 @@ def main() -> int:
                     f'echo "CLAUDE_EXIT_CODE=$CLAUDE_RC"'
                 )
 
-                print(f"  Claude 处理: {rel_label} ({len(text)} 字符)")
+                logger.info("Claude 处理: %s (%s 字符)", rel_label, len(text))
                 exec_resp = sandbox.process.execute_session_command(
                     session_id,
                     SessionExecuteRequest(command=claude_cmd, run_async=True),
@@ -761,7 +760,7 @@ def main() -> int:
             try:
                 _zip_tree(staging, zip_target)
             except OSError as e:
-                print(f"Error: 打包失败: {e}", file=sys.stderr)
+                logger.error("打包失败: %s", e)
                 if same_inout and zip_target.exists():
                     try:
                         zip_target.unlink()
@@ -771,7 +770,7 @@ def main() -> int:
                     try:
                         log_path.parent.mkdir(parents=True, exist_ok=True)
                         log_path.write_text("\n".join(log_blocks), encoding="utf-8")
-                        print(f"（已尽力写入变更日志）{log_path}", file=sys.stderr)
+                        logger.warning("（已尽力写入变更日志）%s", log_path)
                     except OSError:
                         pass
                 return 3
@@ -780,7 +779,7 @@ def main() -> int:
                 try:
                     os.replace(zip_target, output_zip)
                 except OSError as e:
-                    print(f"Error: 无法将临时 ZIP 替换为输出路径: {e}", file=sys.stderr)
+                    logger.error("无法将临时 ZIP 替换为输出路径: %s", e)
                     try:
                         zip_target.unlink()
                     except OSError:
@@ -790,10 +789,14 @@ def main() -> int:
             if log_path and log_blocks:
                 log_path.parent.mkdir(parents=True, exist_ok=True)
                 log_path.write_text("\n".join(log_blocks), encoding="utf-8")
-                print(f"变更日志: {log_path}")
+                logger.info("变更日志: %s", log_path)
 
-            print(f"\n完成: Claude 已写回 {processed} 个文件; 失败/跳过 {failed}")
-            print(f"输出 ZIP: {output_zip}")
+            logger.info(
+                "完成: Claude 已写回 %s 个文件; 失败/跳过 %s",
+                processed,
+                failed,
+            )
+            logger.info("输出 ZIP: %s", output_zip)
             return 0 if failed == 0 else 1
 
         finally:
