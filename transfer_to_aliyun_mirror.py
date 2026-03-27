@@ -679,6 +679,19 @@ def main() -> int:
                         print(f"    会话 stdout（节选）:\n{ol[:3500]}")
                     if out_snip.strip():
                         print(f"    stdout.txt（节选）:\n{out_snip[:2500]}")
+                    diag = f"{se}\n{ol}\n{out_snip}\n{err_snip}"
+                    hint = ""
+                    if "Author anthropic is banned" in diag or "anthropic is banned" in diag.lower():
+                        hint = (
+                            "\n### 定位说明\n"
+                            "上游 API（常见为 OpenRouter）返回 403：当前 Key/组织禁止使用 Anthropic 来源的模型，"
+                            "与脚本或 ZIP 无关。请在供应商控制台更换策略/模型 ID，或改用 Anthropic 官方 API；"
+                            "「Please run /login」在无人值守沙箱中通常无法解决此 403。\n"
+                        )
+                        print(
+                            "    提示: 403「Author anthropic is banned」— 当前 API 线路禁止 Anthropic 模型，"
+                            "请换模型/换 Key 或直连 Anthropic；非本脚本缺陷。"
+                        )
                     failed += 1
                     if log_path:
                         log_blocks.append(
@@ -688,6 +701,7 @@ def main() -> int:
                             f"### 会话 stdout\n{ol or '（空）'}\n"
                             f"### stderr.log\n{err_snip}\n"
                             f"### stdout.txt\n{out_snip}\n"
+                            f"{hint}"
                         )
                     continue
 
