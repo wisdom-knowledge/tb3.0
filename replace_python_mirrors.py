@@ -18,9 +18,10 @@ from typing import Iterable
 from urllib.parse import urlparse
 
 
-ALIYUN_SIMPLE_URL = "https://mirrors.aliyun.com/pypi/simple/"
-ALIYUN_UBUNTU_APT_URL = "https://mirrors.aliyun.com/ubuntu/"
-ALIYUN_DEBIAN_APT_URL = "https://mirrors.aliyun.com/debian/"
+ALIYUN_SIMPLE_URL = "http://mirrors.aliyun.com/pypi/simple/"
+ALIYUN_UBUNTU_APT_URL = "http://mirrors.aliyun.com/ubuntu/"
+ALIYUN_UBUNTU_PORTS_APT_URL = "http://mirrors.aliyun.com/ubuntu-ports/"
+ALIYUN_DEBIAN_APT_URL = "http://mirrors.aliyun.com/debian/"
 DEFAULT_SKIP_DIRS = {
     ".git",
     ".hg",
@@ -179,13 +180,17 @@ def build_apt_rewrite_prefix(distro: str) -> str:
             f"sed -i \"s|http://archive.ubuntu.com/ubuntu/|{ALIYUN_UBUNTU_APT_URL}|g; "
             f"s|https://archive.ubuntu.com/ubuntu/|{ALIYUN_UBUNTU_APT_URL}|g; "
             f"s|http://security.ubuntu.com/ubuntu/|{ALIYUN_UBUNTU_APT_URL}|g; "
-            f"s|https://security.ubuntu.com/ubuntu/|{ALIYUN_UBUNTU_APT_URL}|g\" "
+            f"s|https://security.ubuntu.com/ubuntu/|{ALIYUN_UBUNTU_APT_URL}|g; "
+            f"s|http://ports.ubuntu.com/ubuntu-ports/|{ALIYUN_UBUNTU_PORTS_APT_URL}|g; "
+            f"s|https://ports.ubuntu.com/ubuntu-ports/|{ALIYUN_UBUNTU_PORTS_APT_URL}|g\" "
             "/etc/apt/sources.list.d/ubuntu.sources; fi; "
             "if [ -f /etc/apt/sources.list ]; then "
             f"sed -i \"s|http://archive.ubuntu.com/ubuntu/|{ALIYUN_UBUNTU_APT_URL}|g; "
             f"s|https://archive.ubuntu.com/ubuntu/|{ALIYUN_UBUNTU_APT_URL}|g; "
             f"s|http://security.ubuntu.com/ubuntu/|{ALIYUN_UBUNTU_APT_URL}|g; "
-            f"s|https://security.ubuntu.com/ubuntu/|{ALIYUN_UBUNTU_APT_URL}|g\" "
+            f"s|https://security.ubuntu.com/ubuntu/|{ALIYUN_UBUNTU_APT_URL}|g; "
+            f"s|http://ports.ubuntu.com/ubuntu-ports/|{ALIYUN_UBUNTU_PORTS_APT_URL}|g; "
+            f"s|https://ports.ubuntu.com/ubuntu-ports/|{ALIYUN_UBUNTU_PORTS_APT_URL}|g\" "
             "/etc/apt/sources.list; fi && "
         )
 
@@ -194,14 +199,14 @@ def build_apt_rewrite_prefix(distro: str) -> str:
             "if [ -f /etc/apt/sources.list.d/debian.sources ]; then "
             f"sed -i \"s|http://deb.debian.org/debian|{ALIYUN_DEBIAN_APT_URL.rstrip('/')}|g; "
             f"s|https://deb.debian.org/debian|{ALIYUN_DEBIAN_APT_URL.rstrip('/')}|g; "
-            "s|http://security.debian.org/debian-security|https://mirrors.aliyun.com/debian-security|g; "
-            "s|https://security.debian.org/debian-security|https://mirrors.aliyun.com/debian-security|g\" "
+            "s|http://security.debian.org/debian-security|http://mirrors.aliyun.com/debian-security|g; "
+            "s|https://security.debian.org/debian-security|http://mirrors.aliyun.com/debian-security|g\" "
             "/etc/apt/sources.list.d/debian.sources; fi; "
             "if [ -f /etc/apt/sources.list ]; then "
             f"sed -i \"s|http://deb.debian.org/debian|{ALIYUN_DEBIAN_APT_URL.rstrip('/')}|g; "
             f"s|https://deb.debian.org/debian|{ALIYUN_DEBIAN_APT_URL.rstrip('/')}|g; "
-            "s|http://security.debian.org/debian-security|https://mirrors.aliyun.com/debian-security|g; "
-            "s|https://security.debian.org/debian-security|https://mirrors.aliyun.com/debian-security|g\" "
+            "s|http://security.debian.org/debian-security|http://mirrors.aliyun.com/debian-security|g; "
+            "s|https://security.debian.org/debian-security|http://mirrors.aliyun.com/debian-security|g\" "
             "/etc/apt/sources.list; fi && "
         )
 

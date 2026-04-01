@@ -141,8 +141,14 @@ def build_task_yaml(config: dict, instruction: str) -> str:
     if email := meta.get("author_email"):
         lines.append(f"author_email: {_yaml_scalar(email)}")
 
-    # difficulty (required by Terminal-Bench)
-    difficulty = meta.get("difficulty", "medium")
+    # difficulty (required by Terminal-Bench: easy/medium/hard/unknown)
+    _DIFFICULTY_MAP = {
+        "easy": "easy", "simple": "easy", "beginner": "easy", "basic": "easy",
+        "medium": "medium", "moderate": "medium", "intermediate": "medium",
+        "hard": "hard", "difficult": "hard", "advanced": "hard", "expert": "hard",
+    }
+    raw_diff = str(meta.get("difficulty", "medium")).strip().lower()
+    difficulty = _DIFFICULTY_MAP.get(raw_diff, "unknown")
     lines.append(f"difficulty: {_yaml_scalar(difficulty)}")
 
     # tags
@@ -166,7 +172,27 @@ def build_task_yaml(config: dict, instruction: str) -> str:
 _RE_PIP_INSTALL_START = re.compile(r"^\s*RUN\s+pip\s+install\b", re.IGNORECASE)
 
 
-_TBENCH_APT_DEPS = "RUN apt-get update && apt-get install -y tmux asciinema"
+_TBENCH_APT_DEPS = (
+    'RUN if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then '
+    'sed -i '
+    '"s|http://archive.ubuntu.com/ubuntu/|http://mirrors.aliyun.com/ubuntu/|g; '
+    's|https://archive.ubuntu.com/ubuntu/|http://mirrors.aliyun.com/ubuntu/|g; '
+    's|http://security.ubuntu.com/ubuntu/|http://mirrors.aliyun.com/ubuntu/|g; '
+    's|https://security.ubuntu.com/ubuntu/|http://mirrors.aliyun.com/ubuntu/|g; '
+    's|http://ports.ubuntu.com/ubuntu-ports/|http://mirrors.aliyun.com/ubuntu-ports/|g; '
+    's|https://ports.ubuntu.com/ubuntu-ports/|http://mirrors.aliyun.com/ubuntu-ports/|g" '
+    '/etc/apt/sources.list.d/ubuntu.sources; fi; '
+    'if [ -f /etc/apt/sources.list ]; then '
+    'sed -i '
+    '"s|http://archive.ubuntu.com/ubuntu/|http://mirrors.aliyun.com/ubuntu/|g; '
+    's|https://archive.ubuntu.com/ubuntu/|http://mirrors.aliyun.com/ubuntu/|g; '
+    's|http://security.ubuntu.com/ubuntu/|http://mirrors.aliyun.com/ubuntu/|g; '
+    's|https://security.ubuntu.com/ubuntu/|http://mirrors.aliyun.com/ubuntu/|g; '
+    's|http://ports.ubuntu.com/ubuntu-ports/|http://mirrors.aliyun.com/ubuntu-ports/|g; '
+    's|https://ports.ubuntu.com/ubuntu-ports/|http://mirrors.aliyun.com/ubuntu-ports/|g" '
+    '/etc/apt/sources.list; fi '
+    '&& apt-get update && apt-get install -y tmux asciinema'
+)
 
 
 def clean_dockerfile(content: str) -> str:
@@ -283,17 +309,18 @@ def convert(src: Path, dst: Path) -> None:
 
     if env_dir.is_dir():
         for item in env_dir.iterdir():
-            if not item.is_file():
-                continue
-            if item.name == "Dockerfile":
-                has_dockerfile = True
-                cleaned = clean_dockerfile(item.read_text(encoding="utf-8"))
-                (dst / "Dockerfile").write_text(cleaned, encoding="utf-8")
-            elif item.name == "docker-compose.yaml":
-                has_compose = True
-                shutil.copy2(item, dst / "docker-compose.yaml")
-            else:
-                shutil.copy2(item, dst / item.name)
+            if item.is_file():
+                if item.name == "Dockerfile":
+                    has_dockerfile = True
+                    cleaned = clean_dockerfile(item.read_text(encoding="utf-8"))
+                    (dst / "Dockerfile").write_text(cleaned, encoding="utf-8")
+                elif item.name == "docker-compose.yaml":
+                    has_compose = True
+                    shutil.copy2(item, dst / "docker-compose.yaml")
+                else:
+                    shutil.copy2(item, dst / item.name)
+            elif item.is_dir():
+                shutil.copytree(item, dst / item.name, dirs_exist_ok=True)
 
     if not has_dockerfile:
         print(f"Warning: {env_dir / 'Dockerfile'} not found, skipping Dockerfile.", file=sys.stderr)
